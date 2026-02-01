@@ -1,0 +1,116 @@
+name: voxagent CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/voxagent/**'
+      - 'tests/voxagent/**'
+      - '.github/workflows/voxagent-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/voxagent/**'
+      - 'tests/voxagent/**'
+      - '.github/workflows/voxagent-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff check
+        run: ruff check src/voxagent/
+
+      - name: Run ruff format check
+        run: ruff format --check src/voxagent/
+
+  type-check:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -e ./src/voxagent[dev]
+
+      - name: Run mypy
+        run: mypy src/voxagent --ignore-missing-imports
+        continue-on-error: true  # Allow type errors for now (tech debt)
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e ./src/voxagent[dev,all]
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/voxagent/ --cov=src/voxagent --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.11'
+        with:
+          files: ./coverage.xml
+          flags: voxagent
+          name: voxagent-coverage
+          fail_ci_if_error: false
+
+  build:
+    name: Build Package
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: |
+          cd src/voxagent
+          python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxagent-dist
+          path: src/voxagent/dist/
+

@@ -1,0 +1,132 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voxagent"
+dynamic = ["version"]
+description = "A lightweight, model-agnostic LLM provider abstraction with streaming and tool support"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "voxDomus team" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+keywords = ["ai", "agent", "llm", "openai", "anthropic", "streaming", "mcp", "tools"]
+
+# Core dependencies - minimal footprint
+dependencies = [
+    "pydantic>=2.0",
+    "httpx>=0.25",
+    "anyio>=4.0",
+]
+
+[project.optional-dependencies]
+# Provider-specific dependencies
+openai = [
+    "openai>=1.0",
+    "tiktoken>=0.5",
+]
+anthropic = [
+    "anthropic>=0.25",
+]
+google = [
+    "google-generativeai>=0.5",
+]
+groq = [
+    "groq>=0.4",
+]
+ollama = [
+    "ollama>=0.2",
+]
+# MCP support
+mcp = [
+    "mcp>=1.0",
+]
+# All providers
+all = [
+    "voxagent[openai,anthropic,google,groq,ollama,mcp]",
+]
+# Development dependencies
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/lensator/voxagent"
+Documentation = "https://github.com/lensator/voxagent#readme"
+Repository = "https://github.com/lensator/voxagent"
+Issues = "https://github.com/lensator/voxagent/issues"
+Changelog = "https://github.com/lensator/voxagent/blob/main/CHANGELOG.md"
+
+# Hatch configuration
+[tool.hatch.version]
+path = "_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "*.py",
+    "py.typed",
+    "README.md",
+    "LICENSE",
+]
+exclude = [
+    "__pycache__",
+    "*.pyc",
+]
+
+# Ruff configuration
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["voxagent"]
+
+# Mypy configuration
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+# Pytest configuration
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
