@@ -75,17 +75,17 @@ Repository = "https://github.com/lensator/voxagent"
 Issues = "https://github.com/lensator/voxagent/issues"
 Changelog = "https://github.com/lensator/voxagent/blob/main/CHANGELOG.md"
 
-# Hatch configuration
+# Hatch configuration for src layout
 [tool.hatch.version]
-path = "_version.py"
+path = "src/voxagent/_version.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["src/voxagent"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "*.py",
-    "py.typed",
+    "src/voxagent/**/*.py",
+    "src/voxagent/py.typed",
     "README.md",
     "LICENSE",
 ]
@@ -98,6 +98,7 @@ exclude = [
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+src = ["src"]
 
 [tool.ruff.lint]
 select = [
@@ -129,4 +130,3 @@ disallow_incomplete_defs = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --tb=short"
-
