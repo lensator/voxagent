@@ -86,8 +86,8 @@ def _build_parameters_schema(fn: Callable[..., Any]) -> dict[str, Any]:
     required: list[str] = []
 
     for param_name, param in sig.parameters.items():
-        # Skip 'context' parameter (ToolContext)
-        if param_name == "context":
+        # Skip 'context' or 'ctx' parameter (ToolContext)
+        if param_name in ("context", "ctx"):
             continue
 
         # Skip *args and **kwargs

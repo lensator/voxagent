@@ -1,31 +1,16 @@
 """Tool definition classes.
 
-This module provides ToolDefinition and ToolContext for the agent tool system.
+This module provides ToolDefinition for the agent tool system.
+ToolContext is now defined in context.py for centralized management.
 """
 
 from __future__ import annotations
 
-import asyncio
 import inspect
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-
-class ToolContext:
-    """Context passed to tool functions during execution.
-
-    Provides access to abort signals, dependencies, and other runtime context.
-
-    Attributes:
-        abort_signal: An asyncio.Event that can be used to signal cancellation.
-    """
-
-    def __init__(self, abort_signal: asyncio.Event | None = None) -> None:
-        """Initialize ToolContext.
-
-        Args:
-            abort_signal: Optional event for signaling tool cancellation.
-        """
-        self.abort_signal = abort_signal
+if TYPE_CHECKING:
+    from voxagent.tools.context import ToolContext
 
 
 class ToolDefinition:
@@ -86,15 +71,16 @@ class ToolDefinition:
             The result from the tool execution.
         """
         # Check if execute function accepts 'context' or 'ctx' parameter
+        # Prefer 'ctx' over 'context' since 'context' might be a user parameter
         sig = inspect.signature(self.execute)
-        accepts_context = "context" in sig.parameters
         accepts_ctx = "ctx" in sig.parameters
+        accepts_context = "context" in sig.parameters
 
         call_params = dict(params)
-        if accepts_context:
-            call_params["context"] = context
-        elif accepts_ctx:
+        if accepts_ctx:
             call_params["ctx"] = context
+        elif accepts_context:
+            call_params["context"] = context
 
         if self.is_async:
             return await self.execute(**call_params)
