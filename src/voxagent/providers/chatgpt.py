@@ -206,7 +206,7 @@ class ChatGPTProvider(BaseProvider):
                     input_msgs.append({
                         "type": "message",
                         "role": "assistant",
-                        "content": [{"type": "input_text", "text": msg.content}],
+                        "content": [{"type": "output_text", "text": msg.content}],
                     })
                 # Add function_call items for each tool call
                 for tc in msg.tool_calls:
@@ -242,25 +242,28 @@ class ChatGPTProvider(BaseProvider):
                             "output": block.get("content", ""),
                         })
                     elif hasattr(block, "text"):
-                        # TextBlock
+                        # TextBlock - use output_text for assistant, input_text for user
+                        content_type = "output_text" if msg.role == "assistant" else "input_text"
                         input_msgs.append({
                             "type": "message",
                             "role": "user" if msg.role == "user" else "assistant",
-                            "content": [{"type": "input_text", "text": block.text}],
+                            "content": [{"type": content_type, "text": block.text}],
                         })
                     elif isinstance(block, dict) and "text" in block:
+                        content_type = "output_text" if msg.role == "assistant" else "input_text"
                         input_msgs.append({
                             "type": "message",
                             "role": "user" if msg.role == "user" else "assistant",
-                            "content": [{"type": "input_text", "text": block["text"]}],
+                            "content": [{"type": content_type, "text": block["text"]}],
                         })
             elif isinstance(msg.content, str):
-                # Simple string content
+                # Simple string content - use output_text for assistant, input_text for user
                 role = "user" if msg.role == "user" else "assistant"
+                content_type = "output_text" if msg.role == "assistant" else "input_text"
                 input_msgs.append({
                     "type": "message",
                     "role": role,
-                    "content": [{"type": "input_text", "text": msg.content}],
+                    "content": [{"type": content_type, "text": msg.content}],
                 })
 
         return input_msgs
@@ -335,7 +338,13 @@ class ChatGPTProvider(BaseProvider):
                     if response.status_code == 401:
                         yield ErrorChunk(error="Authentication failed - token may be expired")
                         return
-                    response.raise_for_status()
+                    if response.status_code >= 400:
+                        # Read error body before raising
+                        error_body = await response.aread()
+                        error_text = error_body.decode("utf-8", errors="replace")
+                        logger.error("ChatGPT API error %d: %s", response.status_code, error_text)
+                        yield ErrorChunk(error=f"HTTP {response.status_code}: {error_text[:500]}")
+                        return
 
                     async for line in response.aiter_lines():
                         if abort_signal and abort_signal.aborted:

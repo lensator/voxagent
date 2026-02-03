@@ -125,6 +125,68 @@ class Agent(Generic[DepsT, OutputT]):
         # Toolsets (MCP servers, etc.) - store for later
         self._toolsets = toolsets or []
 
+        # MCP connection caching (persistent across run() calls)
+        self._mcp_manager: MCPServerManager | None = None
+        self._mcp_tools: list[ToolDefinition] = []
+        self._mcp_connected: bool = False
+
+    # -------------------------------------------------------------------------
+    # MCP Connection Management
+    # -------------------------------------------------------------------------
+
+    async def connect_mcp(self) -> list[ToolDefinition]:
+        """Connect to MCP servers and cache the connection.
+
+        This method connects to all MCP servers in toolsets and caches the
+        connection for reuse across multiple run() calls. Call this during
+        initialization/warmup to avoid connection overhead on first message.
+
+        Returns:
+            List of ToolDefinition objects from connected MCP servers.
+        """
+        if self._mcp_connected:
+            return self._mcp_tools
+
+        if self._toolsets:
+            self._mcp_manager = MCPServerManager()
+            await self._mcp_manager.add_servers(self._toolsets)
+            self._mcp_tools = await self._mcp_manager.connect_all()
+            self._mcp_connected = True
+
+        return self._mcp_tools
+
+    async def disconnect_mcp(self) -> None:
+        """Disconnect from MCP servers.
+
+        Call this when the agent is no longer needed to clean up MCP
+        server connections. This is called automatically when using
+        the agent as an async context manager.
+        """
+        if self._mcp_manager and self._mcp_connected:
+            await self._mcp_manager.disconnect_all()
+            self._mcp_manager = None
+            self._mcp_connected = False
+            self._mcp_tools = []
+
+    @property
+    def mcp_connected(self) -> bool:
+        """Check if MCP servers are currently connected."""
+        return self._mcp_connected
+
+    async def __aenter__(self) -> "Agent[DepsT, OutputT]":
+        """Enter async context manager - connect MCP servers."""
+        await self.connect_mcp()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        """Exit async context manager - disconnect MCP servers."""
+        await self.disconnect_mcp()
+
     @staticmethod
     def _parse_model_string(model_string: str) -> ModelConfig:
         """Parse 'provider:model' string into ModelConfig.
@@ -495,19 +557,22 @@ class Agent(Generic[DepsT, OutputT]):
         timeout_handler: TimeoutHandler | None = None
         timed_out = False
         error_message: str | None = None
-        mcp_manager: MCPServerManager | None = None
+        # Track if we connected MCP in this run (for cleanup)
+        mcp_connected_in_this_run = False
 
         if timeout_ms:
             timeout_handler = TimeoutHandler(timeout_ms)
             await timeout_handler.start(abort_controller)
 
         try:
-            # Connect to MCP servers if any
-            mcp_tools: list[ToolDefinition] = []
-            if self._toolsets:
-                mcp_manager = MCPServerManager()
-                await mcp_manager.add_servers(self._toolsets)
-                mcp_tools = await mcp_manager.connect_all()
+            # Use cached MCP connection if available, otherwise connect
+            if self._mcp_connected:
+                mcp_tools = self._mcp_tools
+            elif self._toolsets:
+                mcp_tools = await self.connect_mcp()
+                mcp_connected_in_this_run = True
+            else:
+                mcp_tools = []
 
             # Get all tools (native + MCP)
             all_tools = self._get_all_tools(mcp_tools)
@@ -652,9 +717,10 @@ class Agent(Generic[DepsT, OutputT]):
             )
 
         finally:
-            # Disconnect MCP servers
-            if mcp_manager:
-                await mcp_manager.disconnect_all()
+            # Only disconnect MCP servers if we connected them in this run
+            # (not if using cached connection from connect_mcp())
+            if mcp_connected_in_this_run and not self._mcp_connected:
+                await self.disconnect_mcp()
             if timeout_handler:
                 timeout_handler.cancel()
             abort_controller.cleanup()
@@ -685,19 +751,22 @@ class Agent(Generic[DepsT, OutputT]):
         abort_controller = AbortController()
         timeout_handler: TimeoutHandler | None = None
         timed_out = False
-        mcp_manager: MCPServerManager | None = None
+        # Track if we connected MCP in this run (for cleanup)
+        mcp_connected_in_this_run = False
 
         if timeout_ms:
             timeout_handler = TimeoutHandler(timeout_ms)
             await timeout_handler.start(abort_controller)
 
         try:
-            # Connect to MCP servers if any
-            mcp_tools: list[ToolDefinition] = []
-            if self._toolsets:
-                mcp_manager = MCPServerManager()
-                await mcp_manager.add_servers(self._toolsets)
-                mcp_tools = await mcp_manager.connect_all()
+            # Use cached MCP connection if available, otherwise connect
+            if self._mcp_connected:
+                mcp_tools = self._mcp_tools
+            elif self._toolsets:
+                mcp_tools = await self.connect_mcp()
+                mcp_connected_in_this_run = True
+            else:
+                mcp_tools = []
 
             # Get all tools (native + MCP)
             all_tools = self._get_all_tools(mcp_tools)
@@ -838,9 +907,10 @@ class Agent(Generic[DepsT, OutputT]):
             )
 
         finally:
-            # Disconnect MCP servers
-            if mcp_manager:
-                await mcp_manager.disconnect_all()
+            # Only disconnect MCP servers if we connected them in this run
+            # (not if using cached connection from connect_mcp())
+            if mcp_connected_in_this_run and not self._mcp_connected:
+                await self.disconnect_mcp()
             if timeout_handler:
                 timeout_handler.cancel()
             abort_controller.cleanup()
