@@ -95,6 +95,15 @@ def _execute_in_subprocess(
     """Subprocess entry point for sandboxed execution."""
     # Import here to avoid loading in main process
     import ast
+    import warnings
+
+    # Suppress RestrictedPython SyntaxWarnings about print/printed variable
+    # These warnings are harmless but noisy (about print transformation internals)
+    warnings.filterwarnings(
+        "ignore",
+        message=".*Prints, but never reads 'printed' variable.*",
+        category=SyntaxWarning,
+    )
 
     from RestrictedPython import compile_restricted, safe_builtins
     from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
