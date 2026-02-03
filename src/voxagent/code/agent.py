@@ -101,10 +101,15 @@ class CodeModeExecutor:
             timeout_seconds=config.timeout_seconds,
             memory_limit_mb=config.memory_limit_mb,
         )
-        self.virtual_fs = VirtualFilesystem(tool_registry)
-        
+
         # Tool proxy for routing calls
         self._tool_implementations: dict[str, Any] = {}
+
+        # Create virtual filesystem with call_tool support
+        self.virtual_fs = VirtualFilesystem(
+            registry=tool_registry,
+            tool_caller=self.call_tool,
+        )
     
     def register_tool_implementation(
         self,
@@ -127,9 +132,7 @@ class CodeModeExecutor:
         Returns:
             Captured output or error message
         """
-        # Build globals with virtual filesystem functions only
-        # Note: call_tool is not passed to sandbox due to pickling constraints
-        # The LLM should use ls() and read() to explore, then describe what to call
+        # Build globals with virtual filesystem functions (ls, read, call_tool)
         globals_dict = self.virtual_fs.get_sandbox_globals()
 
         # Execute in sandbox

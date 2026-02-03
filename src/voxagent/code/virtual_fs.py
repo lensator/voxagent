@@ -95,11 +95,15 @@ class ToolRegistry:
         return []
 
 
+# Type alias for tool caller function
+ToolCaller = Any  # Callable[[str, str, ...], Any]
+
+
 class VirtualFilesystem:
     """Virtual filesystem for tool discovery.
-    
+
     Provides ls() and read() functions that can be injected into the sandbox.
-    
+
     Directory structure:
         tools/
         ├── __index__.md
@@ -111,9 +115,14 @@ class VirtualFilesystem:
             ├── __index__.md
             └── temperature.py
     """
-    
-    def __init__(self, registry: ToolRegistry) -> None:
+
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        tool_caller: ToolCaller | None = None,
+    ) -> None:
         self._registry = registry
+        self._tool_caller = tool_caller
     
     def ls(self, path: str) -> list[str]:
         """List directory contents.
@@ -212,12 +221,17 @@ class VirtualFilesystem:
     
     def get_sandbox_globals(self) -> dict[str, Any]:
         """Get globals dict to inject into sandbox.
-        
+
         Returns:
-            Dict with ls and read functions bound to this filesystem
+            Dict with ls, read, and call_tool functions bound to this filesystem
         """
-        return {
+        globals_dict: dict[str, Any] = {
             "ls": self.ls,
             "read": self.read,
         }
+
+        if self._tool_caller is not None:
+            globals_dict["call_tool"] = self._tool_caller
+
+        return globals_dict
 
