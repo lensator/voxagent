@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 No changes yet.
 
+## [0.2.0] - 2026-02-03
+
+### Added
+- **Code Execution Mode**: New `execution_mode="code"` option for agents
+  - `SubprocessSandbox`: Secure Python execution with RestrictedPython and process isolation
+  - `VirtualFilesystem`: `ls()` and `read()` functions for progressive tool discovery
+  - `ToolRegistry`: Registry for tool categories and definitions
+  - `CodeModeExecutor`: Main executor for code mode agents
+  - `ToolProxyClient` and `ToolProxyServer`: Queue-based IPC for routing sandbox calls to real tools
+- New optional dependency: `RestrictedPython>=7.0` (install with `pip install voxagent[code]`)
+
 ## [0.1.0] - 2026-02-01
 
 ### Added
@@ -36,6 +47,7 @@ No changes yet.
 - `ToolDefinition` and `ToolContext` for tool system
 - `Message`, `ToolCall`, `ToolResult` types
 
-[Unreleased]: https://github.com/lensator/voxagent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/lensator/voxagent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/lensator/voxagent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/lensator/voxagent/releases/tag/v0.1.0
 

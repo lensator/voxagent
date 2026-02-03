@@ -55,6 +55,10 @@ ollama = [
 mcp = [
     "mcp>=1.0",
 ]
+# Code sandbox support
+code = [
+    "RestrictedPython>=7.0",
+]
 # All providers
 all = [
     "voxagent[openai,anthropic,google,groq,ollama,mcp]",
