@@ -161,12 +161,34 @@ class CodeModeExecutor:
         Returns:
             Tool result or error message
         """
+        import asyncio
+        import inspect
+
         key = f"{category}.{tool_name}"
         if key not in self._tool_implementations:
             return f"Error: Tool '{key}' not found"
         try:
             impl = self._tool_implementations[key]
-            return impl(**kwargs)
+            result = impl(**kwargs)
+
+            # Handle async functions
+            if inspect.iscoroutine(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop is not None:
+                    # Already in an async context - create task
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, result)
+                        return future.result()
+                else:
+                    # Not in async context - run directly
+                    return asyncio.run(result)
+
+            return result
         except Exception as e:
             return f"Error calling {key}: {e}"
 
