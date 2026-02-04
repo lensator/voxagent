@@ -91,6 +91,8 @@ def _execute_in_subprocess(
     globals_dict: dict[str, Any],
     result_queue: multiprocessing.Queue,  # type: ignore[type-arg]
     memory_limit_mb: int,
+    tool_request_queue: "multiprocessing.Queue[Any] | None" = None,
+    tool_response_queue: "multiprocessing.Queue[Any] | None" = None,
 ) -> None:
     """Subprocess entry point for sandboxed execution."""
     # Import here to avoid loading in main process
@@ -257,6 +259,114 @@ def _execute_in_subprocess(
             "_write_": lambda x: x,
             **globals_dict,
         }
+
+        # Create call_tool function using proxy if queues are provided
+        if tool_request_queue is not None and tool_response_queue is not None:
+            from voxagent.code.tool_proxy import ToolProxyClient
+            proxy_client = ToolProxyClient(tool_request_queue, tool_response_queue)
+
+            def call_tool(category: str, tool_name: str, **kwargs: Any) -> Any:
+                proxy = proxy_client.create_tool_proxy(category, tool_name)
+                return proxy(**kwargs)
+
+            exec_globals["call_tool"] = call_tool
+
+        # Add query functions for efficient data processing
+        from voxagent.code.query import QueryResult
+        import re as _re
+
+        def query(data: list | dict) -> QueryResult:
+            """Wrap data in QueryResult for chaining."""
+            if isinstance(data, dict) and "devices" in data:
+                # Handle list_devices response format
+                return QueryResult(data["devices"])
+            if isinstance(data, dict) and "items" in data:
+                return QueryResult(data["items"])
+            if isinstance(data, list):
+                return QueryResult(data)
+            return QueryResult([data] if data else [])
+
+        def tree(path: str = "tools") -> str:
+            """Show full tool structure with signatures.
+
+            Args:
+                path: Starting path (default: "tools")
+
+            Returns:
+                Tree-formatted string showing all tools
+            """
+            lines = []
+            path = path.rstrip("/")
+
+            # Get ls function from globals_dict
+            ls_func = globals_dict.get("ls")
+            if ls_func is None:
+                return "(ls function not available)"
+
+            # Get root entries
+            entries = ls_func(path)
+            if isinstance(entries, str):
+                # Handle error message
+                return entries
+            for entry in entries:
+                if entry == "__index__.md":
+                    continue
+                if entry.endswith("/"):
+                    # It's a category
+                    cat_name = entry.rstrip("/")
+                    lines.append(f"📁 {cat_name}/")
+                    # Get tools in category
+                    cat_entries = ls_func(f"{path}/{cat_name}")
+                    if isinstance(cat_entries, list):
+                        for tool in cat_entries:
+                            if tool != "__index__.md":
+                                lines.append(f"  📄 {tool}")
+                else:
+                    lines.append(f"📄 {entry}")
+
+            return "\n".join(lines) if lines else "(empty)"
+
+        def search(query_str: str) -> list:
+            """Search for tools by keyword.
+
+            Args:
+                query_str: Search term (matches tool names)
+
+            Returns:
+                List of matching tool paths
+            """
+            results = []
+            pattern = _re.compile(query_str, _re.IGNORECASE)
+
+            # Get ls function from globals_dict
+            ls_func = globals_dict.get("ls")
+            if ls_func is None:
+                return []
+
+            # Search all categories
+            categories = ls_func("tools")
+            if isinstance(categories, str):
+                return []
+            for cat in categories:
+                if cat == "__index__.md" or not cat.endswith("/"):
+                    continue
+                cat_name = cat.rstrip("/")
+                tools = ls_func(f"tools/{cat_name}")
+                if isinstance(tools, str):
+                    continue
+                for tool in tools:
+                    if tool == "__index__.md":
+                        continue
+                    if pattern.search(tool) or pattern.search(cat_name):
+                        results.append(f"tools/{cat_name}/{tool}")
+
+            return results
+
+        exec_globals["query"] = query
+        exec_globals["tree"] = tree
+        exec_globals["search"] = search
+        exec_globals["QueryResult"] = QueryResult
+
         exec(byte_code, exec_globals)
         # Get the _print object that was created during execution and call it
         _print_obj = exec_globals.get("_print")
@@ -298,18 +408,48 @@ class SubprocessSandbox(CodeSandbox):
         self.tool_proxy_client = tool_proxy_client
 
     async def execute(
-        self, code: str, globals_dict: dict[str, Any] | None = None
+        self,
+        code: str,
+        globals_dict: dict[str, Any] | None = None,
+        tool_request_queue: "multiprocessing.Queue[Any] | None" = None,
+        tool_response_queue: "multiprocessing.Queue[Any] | None" = None,
     ) -> SandboxResult:
-        """Execute code in subprocess with RestrictedPython."""
+        """Execute code in subprocess with RestrictedPython.
+
+        Args:
+            code: Python source code to execute
+            globals_dict: Optional globals to inject (e.g., ls, read functions)
+            tool_request_queue: Queue for tool call requests from subprocess
+            tool_response_queue: Queue for tool call responses to subprocess
+
+        Returns:
+            SandboxResult with output or error
+        """
+        import asyncio
+
         start_time = time.monotonic()
 
         result_queue: multiprocessing.Queue[SandboxResult] = multiprocessing.Queue()
         process = multiprocessing.Process(
             target=_execute_in_subprocess,
-            args=(code, globals_dict or {}, result_queue, self.memory_limit_mb),
+            args=(
+                code,
+                globals_dict or {},
+                result_queue,
+                self.memory_limit_mb,
+                tool_request_queue,
+                tool_response_queue,
+            ),
         )
         process.start()
-        process.join(timeout=self.timeout_seconds)
+
+        # Use non-blocking wait to allow event loop to run proxy server
+        # Poll the process status instead of blocking on join()
+        poll_interval = 0.01  # 10ms
+        elapsed = 0.0
+        while process.is_alive() and elapsed < self.timeout_seconds:
+            await asyncio.sleep(poll_interval)
+            elapsed = time.monotonic() - start_time
 
         execution_time_ms = (time.monotonic() - start_time) * 1000
 

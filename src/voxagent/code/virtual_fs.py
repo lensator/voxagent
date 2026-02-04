@@ -95,14 +95,12 @@ class ToolRegistry:
         return []
 
 
-# Type alias for tool caller function
-ToolCaller = Any  # Callable[[str, str, ...], Any]
-
-
 class VirtualFilesystem:
     """Virtual filesystem for tool discovery.
 
     Provides ls() and read() functions that can be injected into the sandbox.
+    The call_tool function is now injected directly by the sandbox using
+    the tool proxy pattern for reliable cross-process communication.
 
     Directory structure:
         tools/
@@ -116,13 +114,8 @@ class VirtualFilesystem:
             └── temperature.py
     """
 
-    def __init__(
-        self,
-        registry: ToolRegistry,
-        tool_caller: ToolCaller | None = None,
-    ) -> None:
+    def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
-        self._tool_caller = tool_caller
     
     def ls(self, path: str) -> list[str]:
         """List directory contents.
@@ -223,15 +216,12 @@ class VirtualFilesystem:
         """Get globals dict to inject into sandbox.
 
         Returns:
-            Dict with ls, read, and call_tool functions bound to this filesystem
+            Dict with ls and read functions bound to this filesystem.
+            Note: call_tool is now injected directly by the sandbox using
+            the tool proxy pattern for reliable cross-process communication.
         """
-        globals_dict: dict[str, Any] = {
+        return {
             "ls": self.ls,
             "read": self.read,
         }
-
-        if self._tool_caller is not None:
-            globals_dict["call_tool"] = self._tool_caller
-
-        return globals_dict
 

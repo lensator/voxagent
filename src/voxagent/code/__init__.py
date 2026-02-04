@@ -30,6 +30,7 @@ from voxagent.code.tool_proxy import (
     ToolProxyServer,
     create_tool_proxy_pair,
 )
+from voxagent.code.query import QueryResult
 
 __all__ = [
     # Sandbox
@@ -52,4 +53,6 @@ __all__ = [
     "ToolProxyClient",
     "ToolProxyServer",
     "create_tool_proxy_pair",
+    # Query
+    "QueryResult",
 ]

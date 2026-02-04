@@ -7,9 +7,12 @@ that calls tools via the virtual filesystem.
 
 from __future__ import annotations
 
+import asyncio
+import multiprocessing
 from typing import TYPE_CHECKING, Any
 
 from voxagent.code.sandbox import SubprocessSandbox, SandboxResult
+from voxagent.code.tool_proxy import ToolProxyServer
 from voxagent.code.virtual_fs import VirtualFilesystem, ToolRegistry
 from voxagent.tools.definition import ToolDefinition
 
@@ -32,6 +35,21 @@ You have access to a single tool: `execute_code`. Use it to write Python code th
 - `call_tool(category, tool_name, **kwargs)` - Call a tool with arguments
 - `print(*args)` - Output results (captured and returned to you)
 
+### Query Functions (for efficient data processing)
+- `query(data)` - Wrap tool result in QueryResult for chaining
+- `tree(path?)` - Show full tool structure at a glance
+- `search(keyword)` - Find tools by name
+
+### QueryResult Methods (chainable)
+- `.filter(**patterns)` - Filter by regex patterns on fields
+- `.map(fields)` - Extract specific fields
+- `.reduce(by?, count?)` - Aggregate/group results
+- `.first()` - Get first result
+- `.last()` - Get last result
+- `.each(fn)` - Apply function to each result
+- `.sort(by, reverse?)` - Sort results by field
+- `.unique(by)` - Remove duplicates by field
+
 ### Workflow
 1. **Explore**: `print(ls("tools/"))` to see categories
 2. **Learn**: `print(read("tools/<category>/<tool>.py"))` to see tool signatures
@@ -49,6 +67,19 @@ print(read("tools/devices/registry.py"))
 # Call the tool
 result = call_tool("devices", "registry.py", device_type="light")
 print("Devices:", result)
+```
+
+### Efficient Device Control Example
+```python
+# Instead of 12+ calls, use 2:
+devices = call_tool("devices", "list_devices")
+device = query(devices).filter(name="balcony").first()
+call_tool("control", "turn_on_device", **device)
+
+# Find all living room lights and turn them off
+devices = call_tool("devices", "list_devices")
+living_lights = query(devices).filter(room="living", type="light")
+living_lights.each(lambda d: call_tool("control", "turn_off_device", device_id=d["device_id"]))
 ```
 
 ### Rules
@@ -83,13 +114,13 @@ class CodeModeConfig:
 
 class CodeModeExecutor:
     """Executes code for an agent in code mode.
-    
+
     This class:
     1. Manages the sandbox and virtual filesystem
     2. Provides the execute_code tool implementation
-    3. Routes tool calls from sandbox to real implementations
+    3. Routes tool calls from sandbox to real implementations via queue-based proxy
     """
-    
+
     def __init__(
         self,
         config: CodeModeConfig,
@@ -97,19 +128,28 @@ class CodeModeExecutor:
     ):
         self.config = config
         self.tool_registry = tool_registry
+
+        # Create tool proxy queues (queues are picklable, client/server objects are not)
+        self._tool_request_queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
+        self._tool_response_queue: multiprocessing.Queue[Any] = multiprocessing.Queue()
+
+        # Create proxy server for main process
+        self._proxy_server = ToolProxyServer(
+            self._tool_request_queue,
+            self._tool_response_queue,
+        )
+
+        # Create sandbox (queues passed during execute)
         self.sandbox = SubprocessSandbox(
             timeout_seconds=config.timeout_seconds,
             memory_limit_mb=config.memory_limit_mb,
         )
 
-        # Tool proxy for routing calls
+        # Tool implementations registry (kept for backward compatibility)
         self._tool_implementations: dict[str, Any] = {}
 
-        # Create virtual filesystem with call_tool support
-        self.virtual_fs = VirtualFilesystem(
-            registry=tool_registry,
-            tool_caller=self.call_tool,
-        )
+        # Create virtual filesystem (no longer needs tool_caller)
+        self.virtual_fs = VirtualFilesystem(registry=tool_registry)
     
     def register_tool_implementation(
         self,
@@ -120,6 +160,8 @@ class CodeModeExecutor:
         """Register a real tool implementation for the proxy."""
         key = f"{category}.{tool_name}"
         self._tool_implementations[key] = implementation
+        # Also register with proxy server for queue-based communication
+        self._proxy_server.register_implementation(category, tool_name, implementation)
 
     async def execute_code(self, code: str) -> str:
         """Execute Python code in the sandbox.
@@ -132,11 +174,29 @@ class CodeModeExecutor:
         Returns:
             Captured output or error message
         """
-        # Build globals with virtual filesystem functions (ls, read, call_tool)
+        # Build globals with virtual filesystem functions (ls, read)
         globals_dict = self.virtual_fs.get_sandbox_globals()
 
-        # Execute in sandbox
-        result = await self.sandbox.execute(code, globals_dict)
+        # Start proxy server task to handle tool calls from subprocess
+        server_task = asyncio.create_task(
+            self._proxy_server.run_until_complete(timeout=self.config.timeout_seconds + 5)
+        )
+
+        try:
+            # Execute in sandbox with queues for tool proxy
+            result = await self.sandbox.execute(
+                code,
+                globals_dict,
+                tool_request_queue=self._tool_request_queue,
+                tool_response_queue=self._tool_response_queue,
+            )
+        finally:
+            # Stop server
+            self._proxy_server.stop()
+            try:
+                await asyncio.wait_for(server_task, timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
 
         # Format output
         if result.success:
