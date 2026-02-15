@@ -17,6 +17,8 @@ class Session(BaseModel):
     id: str = Field(..., description="Unique session ID (UUID)")
     key: str = Field(..., description="Session key for resolution")
     messages: list[Message] = Field(default_factory=list)
+    summary: str | None = Field(None, description="Current summary of the conversation")
+    summary_metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata about the summary")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = Field(default_factory=dict)

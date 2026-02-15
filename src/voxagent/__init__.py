@@ -106,6 +106,12 @@ def __getattr__(name: str) -> object:
 
         return getattr(providers, name)
 
+    # Strategies
+    if name in ("AgentStrategy", "StrategyContext", "StrategyResult", "DefaultStrategy"):
+        from . import strategies
+
+        return getattr(strategies, name)
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -139,5 +145,10 @@ __all__ = [
     "MaxDepthExceededError",
     # MCP
     "MCPServerManager",
+    # Strategies
+    "AgentStrategy",
+    "StrategyContext",
+    "StrategyResult",
+    "DefaultStrategy",
 ]
 

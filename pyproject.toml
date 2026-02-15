@@ -59,9 +59,14 @@ mcp = [
 code = [
     "RestrictedPython>=7.0",
 ]
+# Home Orchestrator support
+home = [
+    "lancedb>=0.17.0",
+    "sentence-transformers>=3.0",
+]
 # All providers
 all = [
-    "voxagent[openai,anthropic,google,groq,ollama,mcp]",
+    "voxagent[openai,anthropic,google,groq,ollama,mcp,code,home]",
 ]
 # Development dependencies
 dev = [

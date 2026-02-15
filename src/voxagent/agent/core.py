@@ -35,6 +35,8 @@ from voxagent.tools.executor import execute_tool
 from voxagent.tools.registry import ToolRegistry
 from voxagent.types.messages import Message, ToolCall, ToolResult
 from voxagent.types.run import ModelConfig, RunResult, ToolMeta
+from voxagent.strategies.base import AgentStrategy, StrategyContext, StrategyResult
+from voxagent.strategies.default import DefaultStrategy
 
 if TYPE_CHECKING:
     pass
@@ -68,6 +70,9 @@ class Agent(Generic[DepsT, OutputT]):
         max_sub_agent_depth: int = DEFAULT_MAX_DEPTH,
         retries: int = 1,
         result_retries: int = 1,
+        # Strategy
+        strategy: AgentStrategy | None = None,
+        session_storage: Any | None = None,
         # Security features
         secret_patterns: list[str] | None = None,
         secrets_to_redact: dict[str, str] | None = None,
@@ -86,6 +91,8 @@ class Agent(Generic[DepsT, OutputT]):
             max_sub_agent_depth: Maximum nesting depth for sub-agent calls (default: 5)
             retries: Number of retries for failed operations (default: 1)
             result_retries: Number of retries for result validation (default: 1)
+            strategy: Optional execution strategy. Defaults to DefaultStrategy.
+            session_storage: Optional session storage for persistence and hybrid memory.
             secret_patterns: Regex patterns to detect and mask secrets
             secrets_to_redact: Dictionary of named secrets to redact
         """
@@ -105,6 +112,12 @@ class Agent(Generic[DepsT, OutputT]):
         # Security configuration
         self._secret_patterns = secret_patterns
         self._secrets_to_redact = secrets_to_redact
+
+        # Strategy (default to DefaultStrategy for backwards compatibility)
+        self._strategy = strategy or DefaultStrategy()
+
+        # Session storage
+        self._session_storage = session_storage
 
         # Tool registry
         self._tool_registry = ToolRegistry()
@@ -249,6 +262,21 @@ class Agent(Generic[DepsT, OutputT]):
     def model_config(self) -> ModelConfig:
         """Get the model configuration."""
         return self._model_config
+
+    def set_model(self, model: str) -> None:
+        """Change the model on the fly.
+
+        Args:
+            model: New model string in "provider:model" format.
+        """
+        self._model_config = self._parse_model_string(model)
+        self._model_string = model
+
+    @property
+    def formatter(self) -> Any:
+        """Get the appropriate formatter for the current provider."""
+        from voxagent.formatting.registry import get_formatter_for_provider
+        return get_formatter_for_provider(self.provider)
 
     @property
     def deps_type(self) -> type[DepsT] | None:
@@ -523,9 +551,19 @@ class Agent(Generic[DepsT, OutputT]):
             session_key: The session key.
             messages: The messages to save.
         """
-        # For now, this is a placeholder - session persistence will be
-        # handled by the session storage layer
-        pass
+        if not self._session_storage:
+            return
+
+        from voxagent.session.model import Session
+        
+        # Load existing or create new
+        session = await self._session_storage.load(session_key)
+        if not session:
+            session = Session.create(key=session_key)
+            
+        # Update messages
+        session.messages = messages
+        await self._session_storage.save(session)
 
     # =========================================================================
     # Run Methods
@@ -533,21 +571,23 @@ class Agent(Generic[DepsT, OutputT]):
 
     async def run(
         self,
-        prompt: str,
+        prompt: str | dict[str, Any] | Any,
         *,
         deps: DepsT | None = None,
         session_key: str | None = None,
         message_history: list[Message] | None = None,
         timeout_ms: int | None = None,
+        strategy: AgentStrategy | None = None,
     ) -> RunResult:
         """Run the agent with a prompt.
 
         Args:
-            prompt: The user prompt to process.
+            prompt: The user prompt to process (string or structured object).
             deps: Optional dependencies to inject into tools.
             session_key: Optional session key for persistence.
             message_history: Optional message history to prepend.
             timeout_ms: Optional timeout in milliseconds.
+            strategy: Optional strategy override for this run.
 
         Returns:
             RunResult containing messages, outputs, and metadata.
@@ -556,7 +596,6 @@ class Agent(Generic[DepsT, OutputT]):
         abort_controller = AbortController()
         timeout_handler: TimeoutHandler | None = None
         timed_out = False
-        error_message: str | None = None
         # Track if we connected MCP in this run (for cleanup)
         mcp_connected_in_this_run = False
 
@@ -576,10 +615,17 @@ class Agent(Generic[DepsT, OutputT]):
 
             # Get all tools (native + MCP)
             all_tools = self._get_all_tools(mcp_tools)
-            has_any_tools = self._has_any_tools(mcp_tools)
 
             # Build messages list
             messages: list[Message] = []
+
+            # Prepend session summary if available
+            summary_content = None
+            if session_key and self._session_storage:
+                session = await self._session_storage.load(session_key)
+                if session and session.summary:
+                    summary_content = f"CONTEXT SUMMARY: {session.summary}"
+                    messages.append(Message(role="system", content=summary_content))
 
             # Add system prompt if present
             if self._system_prompt:
@@ -589,105 +635,40 @@ class Agent(Generic[DepsT, OutputT]):
             if message_history:
                 messages.extend(message_history)
 
+            # Process prompt (handle structured input)
+            final_prompt = prompt
+            if not isinstance(prompt, str):
+                # Use formatter to serialize structured data
+                if isinstance(prompt, dict):
+                    # Format as key-value blocks using the active formatter
+                    formatted_parts = []
+                    for key, value in prompt.items():
+                        formatted_parts.append(self.formatter.format_observation(f"{key}: {value}"))
+                    final_prompt = "\n".join(formatted_parts)
+                else:
+                    final_prompt = str(prompt)
+
             # Add user prompt
-            messages.append(Message(role="user", content=prompt))
+            messages.append(Message(role="user", content=final_prompt))
 
             # Get provider
             provider = self._get_provider()
 
-            # Track assistant texts and tool metas
-            assistant_texts: list[str] = []
-            tool_metas: list[ToolMeta] = []
+            # Use strategy if provided (per-call override) or fall back to agent default
+            active_strategy = strategy or self._strategy
 
-            # Inference loop
-            while not abort_controller.signal.aborted:
-                # Stream from provider
-                response_text = ""
-                tool_calls: list[ToolCall] = []
+            # Create strategy context
+            strategy_ctx = StrategyContext(
+                provider=provider,
+                tools=all_tools,
+                system_prompt=self._system_prompt,
+                abort_signal=abort_controller.signal,
+                run_id=run_id,
+                deps=deps,
+            )
 
-                try:
-                    async for chunk in provider.stream(
-                        messages=messages,
-                        system=self._system_prompt,
-                        tools=[t.to_openai_schema() for t in all_tools]
-                        if has_any_tools
-                        else None,
-                        abort_signal=abort_controller.signal,
-                    ):
-                        if isinstance(chunk, TextDeltaChunk):
-                            response_text += chunk.delta
-                        elif isinstance(chunk, ToolUseChunk):
-                            tool_calls.append(chunk.tool_call)
-                        elif isinstance(chunk, ErrorChunk):
-                            error_message = chunk.error
-                            break
-                        elif isinstance(chunk, MessageEndChunk):
-                            break
-                except Exception as e:
-                    error_message = str(e)
-                    break
-
-                # Record assistant text
-                if response_text:
-                    assistant_texts.append(response_text)
-
-                # Add assistant message
-                messages.append(
-                    Message(
-                        role="assistant",
-                        content=response_text,
-                        tool_calls=tool_calls if tool_calls else None,
-                    )
-                )
-
-                # Execute tool calls if any
-                if tool_calls:
-                    for tc in tool_calls:
-                        start_time = time.monotonic()
-
-                        result = await execute_tool(
-                            name=tc.name,
-                            params=tc.params,
-                            tools=all_tools,
-                            abort_signal=abort_controller.signal,
-                            tool_use_id=tc.id,
-                            deps=deps,
-                            session_id=session_key,
-                            run_id=run_id,
-                        )
-
-                        execution_time_ms = int(
-                            (time.monotonic() - start_time) * 1000
-                        )
-
-                        tool_metas.append(
-                            ToolMeta(
-                                tool_name=tc.name,
-                                tool_call_id=tc.id,
-                                execution_time_ms=execution_time_ms,
-                                success=not result.is_error,
-                                error=result.content if result.is_error else None,
-                            )
-                        )
-
-                        # Add tool result as user message with tool_result content
-                        messages.append(
-                            Message(
-                                role="user",
-                                content=[
-                                    {
-                                        "type": "tool_result",
-                                        "tool_use_id": tc.id,
-                                        "tool_name": tc.name,
-                                        "content": result.content,
-                                        "is_error": result.is_error,
-                                    }
-                                ],
-                            )
-                        )
-                else:
-                    # No tool calls, done
-                    break
+            # Execute strategy
+            strategy_result = await active_strategy.execute(strategy_ctx, messages)
 
             # Check timeout
             if timeout_handler and timeout_handler.expired:
@@ -695,15 +676,16 @@ class Agent(Generic[DepsT, OutputT]):
 
             # Save session if key provided
             if session_key:
-                await self._save_session(session_key, messages)
+                await self._save_session(session_key, strategy_result.messages)
 
+            # Convert StrategyResult to RunResult
             return RunResult(
-                messages=messages,
-                assistant_texts=assistant_texts,
-                tool_metas=tool_metas,
+                messages=strategy_result.messages,
+                assistant_texts=strategy_result.assistant_texts,
+                tool_metas=strategy_result.tool_metas,
                 aborted=abort_controller.signal.aborted and not timed_out,
                 timed_out=timed_out,
-                error=error_message,
+                error=strategy_result.error,
             )
 
         except Exception as e:
@@ -727,27 +709,29 @@ class Agent(Generic[DepsT, OutputT]):
 
     async def run_stream(
         self,
-        prompt: str,
+        prompt: str | dict[str, Any] | Any,
         *,
         deps: DepsT | None = None,
         session_key: str | None = None,
         message_history: list[Message] | None = None,
         timeout_ms: int | None = None,
+        strategy: AgentStrategy | None = None,
     ) -> AsyncIterator[StreamEventData]:
         """Run the agent with streaming events.
 
         Args:
-            prompt: The user prompt to process.
+            prompt: The user prompt to process (string or structured object).
             deps: Optional dependencies to inject into tools.
             session_key: Optional session key for persistence.
             message_history: Optional message history to prepend.
             timeout_ms: Optional timeout in milliseconds.
+            strategy: Optional strategy override for this run.
 
         Yields:
             StreamEventData events for the run lifecycle.
         """
         run_id = str(uuid.uuid4())
-        session = session_key or f"ephemeral-{run_id}"
+        session_id = session_key or f"ephemeral-{run_id}"
         abort_controller = AbortController()
         timeout_handler: TimeoutHandler | None = None
         timed_out = False
@@ -770,13 +754,18 @@ class Agent(Generic[DepsT, OutputT]):
 
             # Get all tools (native + MCP)
             all_tools = self._get_all_tools(mcp_tools)
-            has_any_tools = self._has_any_tools(mcp_tools)
 
             # Emit run start
-            yield RunStartEvent(run_id=run_id, session_key=session)
+            yield RunStartEvent(run_id=run_id, session_key=session_id)
 
             # Build messages list
             messages: list[Message] = []
+
+            # Prepend session summary if available
+            if session_key and self._session_storage:
+                session = await self._session_storage.load(session_key)
+                if session and session.summary:
+                    messages.append(Message(role="system", content=f"CONTEXT SUMMARY: {session.summary}"))
 
             if self._system_prompt:
                 messages.append(Message(role="system", content=self._system_prompt))
@@ -784,106 +773,38 @@ class Agent(Generic[DepsT, OutputT]):
             if message_history:
                 messages.extend(message_history)
 
-            messages.append(Message(role="user", content=prompt))
+            # Process prompt
+            final_prompt = prompt
+            if not isinstance(prompt, str):
+                if isinstance(prompt, dict):
+                    formatted_parts = []
+                    for key, value in prompt.items():
+                        formatted_parts.append(self.formatter.format_observation(f"{key}: {value}"))
+                    final_prompt = "\n".join(formatted_parts)
+                else:
+                    final_prompt = str(prompt)
+
+            messages.append(Message(role="user", content=final_prompt))
 
             # Get provider
             provider = self._get_provider()
 
-            # Track tool metas
-            tool_metas: list[ToolMeta] = []
+            # Use strategy if provided (per-call override) or fall back to agent default
+            active_strategy = strategy or self._strategy
 
-            # Inference loop
-            while not abort_controller.signal.aborted:
-                response_text = ""
-                tool_calls: list[ToolCall] = []
+            # Create strategy context
+            strategy_ctx = StrategyContext(
+                provider=provider,
+                tools=all_tools,
+                system_prompt=self._system_prompt,
+                abort_signal=abort_controller.signal,
+                run_id=run_id,
+                deps=deps,
+            )
 
-                try:
-                    async for chunk in provider.stream(
-                        messages=messages,
-                        system=self._system_prompt,
-                        tools=[t.to_openai_schema() for t in all_tools]
-                        if has_any_tools
-                        else None,
-                        abort_signal=abort_controller.signal,
-                    ):
-                        if isinstance(chunk, TextDeltaChunk):
-                            response_text += chunk.delta
-                            yield TextDeltaEvent(run_id=run_id, delta=chunk.delta)
-                        elif isinstance(chunk, ToolUseChunk):
-                            tool_calls.append(chunk.tool_call)
-                        elif isinstance(chunk, ErrorChunk):
-                            yield RunErrorEvent(run_id=run_id, error=chunk.error)
-                            break
-                        elif isinstance(chunk, MessageEndChunk):
-                            break
-                except Exception as e:
-                    yield RunErrorEvent(run_id=run_id, error=str(e))
-                    break
-
-                # Add assistant message
-                messages.append(
-                    Message(
-                        role="assistant",
-                        content=response_text,
-                        tool_calls=tool_calls if tool_calls else None,
-                    )
-                )
-
-                # Execute tool calls if any
-                if tool_calls:
-                    for tc in tool_calls:
-                        yield ToolStartEvent(run_id=run_id, tool_call=tc)
-
-                        start_time = time.monotonic()
-
-                        result = await execute_tool(
-                            name=tc.name,
-                            params=tc.params,
-                            tools=all_tools,
-                            abort_signal=abort_controller.signal,
-                            tool_use_id=tc.id,
-                            deps=deps,
-                            session_id=session_key,
-                            run_id=run_id,
-                        )
-
-                        execution_time_ms = int(
-                            (time.monotonic() - start_time) * 1000
-                        )
-
-                        tool_metas.append(
-                            ToolMeta(
-                                tool_name=tc.name,
-                                tool_call_id=tc.id,
-                                execution_time_ms=execution_time_ms,
-                                success=not result.is_error,
-                                error=result.content if result.is_error else None,
-                            )
-                        )
-
-                        yield ToolEndEvent(
-                            run_id=run_id,
-                            tool_call_id=tc.id,
-                            result=result,
-                        )
-
-                        # Add tool result message
-                        messages.append(
-                            Message(
-                                role="user",
-                                content=[
-                                    {
-                                        "type": "tool_result",
-                                        "tool_use_id": tc.id,
-                                        "tool_name": tc.name,
-                                        "content": result.content,
-                                        "is_error": result.is_error,
-                                    }
-                                ],
-                            )
-                        )
-                else:
-                    break
+            # Execute strategy with streaming
+            async for event in active_strategy.execute_stream(strategy_ctx, messages):
+                yield event
 
             # Check timeout
             if timeout_handler and timeout_handler.expired:
