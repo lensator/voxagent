@@ -123,9 +123,7 @@ class LanceDBMemoryManager:
         for file in dir_path.glob("**/*.md"):
             content = file.read_text(encoding="utf-8")
             # Simple chunking by paragraph for now
-            chunks = [c.strip() for c in content.split("
-
-") if c.strip()]
+            chunks = [c.strip() for c in content.split("\n\n") if c.strip()]
             for chunk in chunks:
                 await self.add_fact(chunk, str(file))
 

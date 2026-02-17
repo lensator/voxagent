@@ -13,6 +13,7 @@ This subpackage contains unified interfaces for various LLM providers:
 """
 
 from voxagent.providers.anthropic import AnthropicProvider
+from voxagent.providers.antigravity import AntigravityProvider
 from voxagent.providers.augment import AugmentProvider
 from voxagent.providers.auth import (
     AuthProfile,
@@ -25,6 +26,7 @@ from voxagent.providers.base import (
     BaseProvider,
     ErrorChunk,
     MessageEndChunk,
+    ProviderRequestChunk,
     StreamChunk,
     TextDeltaChunk,
     ToolUseChunk,
@@ -52,6 +54,7 @@ from voxagent.providers.registry import (
 __all__ = [
     "AbortSignal",
     "AnthropicProvider",
+    "AntigravityProvider",
     "AugmentProvider",
     "AuthProfile",
     "AuthProfileManager",
@@ -74,6 +77,7 @@ __all__ = [
     "OpenAIProvider",
     "ProviderNotFoundError",
     "ProviderRegistry",
+    "ProviderRequestChunk",
     "StreamChunk",
     "TextDeltaChunk",
     "ToolUseChunk",
@@ -99,6 +103,7 @@ def _register_default_providers() -> None:
         registry.register("groq", GroqProvider)
         registry.register("ollama", OllamaProvider)
         registry.register("chatgpt", ChatGPTProvider)
+        registry.register("antigravity", AntigravityProvider)
         # CLI-wrapped providers
         registry.register("augment", AugmentProvider)
         registry.register("codex", CodexProvider)

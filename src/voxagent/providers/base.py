@@ -67,8 +67,22 @@ class ErrorChunk(BaseModel):
     error: str
 
 
+class ProviderRequestChunk(BaseModel):
+    """A chunk containing the raw request data sent to the provider.
+
+    Attributes:
+        type: Discriminator field, always "provider_request".
+        body: The raw request body (dict or string).
+    """
+
+    type: Literal["provider_request"] = "provider_request"
+    body: Any
+
+
 # Union type for all stream chunks
-StreamChunk = TextDeltaChunk | ToolUseChunk | MessageEndChunk | ErrorChunk
+StreamChunk = (
+    TextDeltaChunk | ToolUseChunk | MessageEndChunk | ErrorChunk | ProviderRequestChunk
+)
 
 
 # =============================================================================

@@ -11,7 +11,7 @@ Event Categories:
 """
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -114,10 +114,12 @@ class TextDeltaEvent(BaseEvent):
     Attributes:
         run_id: Unique identifier for the run.
         delta: The text chunk.
+        module: The source module/stage (default: 'assistant').
         event_type: Discriminator field for type narrowing.
     """
 
     delta: str
+    module: str = "assistant"
     event_type: Literal["text_delta"] = "text_delta"
 
 
@@ -132,6 +134,34 @@ class AssistantEndEvent(BaseEvent):
 
     message: Message
     event_type: Literal["assistant_end"] = "assistant_end"
+
+
+class ProviderRequestEvent(BaseEvent):
+    """Event emitted when a raw request is sent to the provider.
+
+    Attributes:
+        run_id: Unique identifier for the run.
+        body: The raw request body (dict or string).
+        event_type: Discriminator field for type narrowing.
+    """
+
+    body: Any
+    event_type: Literal["provider_request"] = "provider_request"
+
+
+class InternalThoughtEvent(BaseEvent):
+    """Event emitted for internal agent reasoning or background processing.
+
+    Attributes:
+        run_id: Unique identifier for the run.
+        content: The thought or background process output.
+        module: The name of the module or stage producing the thought.
+        event_type: Discriminator field for type narrowing.
+    """
+
+    content: str
+    module: str = "agent"
+    event_type: Literal["internal_thought"] = "internal_thought"
 
 
 # =============================================================================
@@ -229,6 +259,8 @@ StreamEventData = (
     | AssistantStartEvent
     | TextDeltaEvent
     | AssistantEndEvent
+    | ProviderRequestEvent
+    | InternalThoughtEvent
     | ToolStartEvent
     | ToolOutputEvent
     | ToolEndEvent
@@ -243,6 +275,8 @@ __all__ = [
     "BaseEvent",
     "CompactionEndEvent",
     "CompactionStartEvent",
+    "InternalThoughtEvent",
+    "ProviderRequestEvent",
     "RunEndEvent",
     "RunErrorEvent",
     "RunStartEvent",

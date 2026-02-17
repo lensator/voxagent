@@ -43,6 +43,9 @@ class StrategyContext:
     abort_signal: "AbortSignal"
     run_id: str
 
+    # Memory and Sync
+    memory_manager: Any | None = None
+
     # Dependencies for tool execution
     deps: Any = None
 
@@ -61,8 +64,9 @@ class StrategyContext:
         response_text = ""
         tool_calls: list["ToolCall"] = []
 
+        from voxagent.types.messages import Message as Msg
         async for chunk in self.provider.stream(
-            messages=messages,
+            messages=[m if isinstance(m, Msg) else Msg(**m) for m in messages],
             system=self.system_prompt,
             tools=[t.to_openai_schema() for t in self.tools] if self.tools else None,
             abort_signal=self.abort_signal,
@@ -167,18 +171,26 @@ class StrategyContext:
         from voxagent.providers.base import (
             ErrorChunk,
             MessageEndChunk,
+            ProviderRequestChunk,
             TextDeltaChunk,
         )
-        from voxagent.streaming.events import RunErrorEvent, TextDeltaEvent
+        from voxagent.streaming.events import (
+            ProviderRequestEvent,
+            RunErrorEvent,
+            TextDeltaEvent,
+        )
 
+        from voxagent.types.messages import Message as Msg
         async for chunk in self.provider.stream(
-            messages=messages,
+            messages=[m if isinstance(m, Msg) else Msg(**m) for m in messages],
             system=self.system_prompt,
             tools=[t.to_openai_schema() for t in self.tools] if self.tools else None,
             abort_signal=self.abort_signal,
         ):
             if isinstance(chunk, TextDeltaChunk):
                 yield TextDeltaEvent(run_id=self.run_id, delta=chunk.delta)
+            elif isinstance(chunk, ProviderRequestChunk):
+                yield ProviderRequestEvent(run_id=self.run_id, body=chunk.body)
             elif isinstance(chunk, ErrorChunk):
                 yield RunErrorEvent(run_id=self.run_id, error=chunk.error)
                 return
@@ -194,10 +206,12 @@ class StrategyContext:
         from voxagent.providers.base import (
             ErrorChunk,
             MessageEndChunk,
+            ProviderRequestChunk,
             TextDeltaChunk,
             ToolUseChunk,
         )
         from voxagent.streaming.events import (
+            ProviderRequestEvent,
             RunErrorEvent,
             TextDeltaEvent,
             ToolEndEvent,
@@ -218,7 +232,7 @@ class StrategyContext:
 
             # Stream LLM response
             async for chunk in self.provider.stream(
-                messages=working_messages,
+                messages=[m if isinstance(m, Msg) else Msg(**m) for m in working_messages],
                 system=self.system_prompt,
                 tools=[t.to_openai_schema() for t in self.tools]
                 if self.tools
@@ -230,6 +244,8 @@ class StrategyContext:
                     yield TextDeltaEvent(run_id=self.run_id, delta=chunk.delta)
                 elif isinstance(chunk, ToolUseChunk):
                     tool_calls.append(chunk.tool_call)
+                elif isinstance(chunk, ProviderRequestChunk):
+                    yield ProviderRequestEvent(run_id=self.run_id, body=chunk.body)
                 elif isinstance(chunk, ErrorChunk):
                     yield RunErrorEvent(run_id=self.run_id, error=chunk.error)
                     return

@@ -57,31 +57,34 @@ class HomeSyncManager:
             await asyncio.sleep(self.sync_interval)
 
     async def perform_full_sync(self):
-        """Fetch all devices from the platform and update LanceDB."""
+        """Fetch all devices/items from the platforms and update LanceDB."""
         if not self.agent.mcp_connected:
             await self.agent.connect_mcp()
 
-        # Fetch current tools (devices) from MCP
-        tools = self.agent.tools # This includes MCP discovered tools
+        # Fetch current tools (devices/items) from all connected MCP servers
+        tools = self.agent.tools 
         
         for tool in tools:
-            # We index each tool as a potential action/device
+            # We index each tool as a potential action/device/item
+            # We use generic terminology to support any platform (HA, OpenHAB, etc.)
             entry = (
-                f"DEVICE_INFO: Name: {tool.name}. Description: {tool.description}. "
-                f"Status: Operational. Capabilities: {list(tool.parameters.get('properties', {}).keys())}"
+                f"HARDWARE_INFO: Name: {tool.name}. Description: {tool.description}. "
+                f"Platform: {getattr(tool, 'server_name', 'unknown')}. "
+                f"Capabilities: {list(tool.parameters.get('properties', {}).keys())}"
             )
             
             # Upsert into LanceDB
             await self.memory.add_fact(
                 entry, 
-                source="auto_sync", 
+                source="auto_platform_sync", 
                 metadata={
-                    "device_id": tool.name, 
+                    "item_id": tool.name, 
+                    "platform": getattr(tool, 'server_name', 'unknown'),
                     "last_sync": datetime.now(timezone.utc).isoformat()
                 }
             )
         
-        print(f"[{datetime.now().time()}] Auto-Sync Complete: {len(tools)} devices updated.")
+        print(f"[{datetime.now().time()}] Platform Auto-Sync Complete: {len(tools)} entities updated.")
 
     def get_status(self) -> Dict[str, Any]:
         """Get the current status of the sync manager."""

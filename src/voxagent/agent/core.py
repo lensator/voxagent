@@ -72,6 +72,7 @@ class Agent(Generic[DepsT, OutputT]):
         result_retries: int = 1,
         # Strategy
         strategy: AgentStrategy | None = None,
+        config_dir: str | None = None,
         session_storage: Any | None = None,
         # Security features
         secret_patterns: list[str] | None = None,
@@ -92,6 +93,7 @@ class Agent(Generic[DepsT, OutputT]):
             retries: Number of retries for failed operations (default: 1)
             result_retries: Number of retries for result validation (default: 1)
             strategy: Optional execution strategy. Defaults to DefaultStrategy.
+            config_dir: Optional directory for persistent configuration (memory, rules, agents).
             session_storage: Optional session storage for persistence and hybrid memory.
             secret_patterns: Regex patterns to detect and mask secrets
             secrets_to_redact: Dictionary of named secrets to redact
@@ -116,8 +118,29 @@ class Agent(Generic[DepsT, OutputT]):
         # Strategy (default to DefaultStrategy for backwards compatibility)
         self._strategy = strategy or DefaultStrategy()
 
-        # Session storage
+        # Config directory and internal services
+        self._config_dir = config_dir
         self._session_storage = session_storage
+        self._memory_manager: Any | None = None
+        self._sync_manager: Any | None = None
+
+        if self._config_dir:
+            from pathlib import Path
+            from voxagent.session.storage import FileSessionStorage
+            from voxagent.memory.lancedb import LanceDBMemoryManager
+            from voxagent.memory.sync import HomeSyncManager
+
+            config_path = Path(self._config_dir)
+            
+            # 1. Initialize Storage
+            if not self._session_storage:
+                self._session_storage = FileSessionStorage(config_path / "sessions")
+            
+            # 2. Initialize Memory
+            self._memory_manager = LanceDBMemoryManager(uri=str(config_path / "memory" / "lancedb"))
+            
+            # 3. Initialize Sync Manager (Lazy start)
+            self._sync_manager = HomeSyncManager(self, self._memory_manager)
 
         # Tool registry
         self._tool_registry = ToolRegistry()
@@ -187,8 +210,10 @@ class Agent(Generic[DepsT, OutputT]):
         return self._mcp_connected
 
     async def __aenter__(self) -> "Agent[DepsT, OutputT]":
-        """Enter async context manager - connect MCP servers."""
+        """Enter async context manager - connect MCP and start sync."""
         await self.connect_mcp()
+        if self._sync_manager:
+            await self._sync_manager.start()
         return self
 
     async def __aexit__(
@@ -197,7 +222,9 @@ class Agent(Generic[DepsT, OutputT]):
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        """Exit async context manager - disconnect MCP servers."""
+        """Exit async context manager - disconnect MCP and stop sync."""
+        if self._sync_manager:
+            await self._sync_manager.stop()
         await self.disconnect_mcp()
 
     @staticmethod
@@ -633,7 +660,10 @@ class Agent(Generic[DepsT, OutputT]):
 
             # Add message history if provided
             if message_history:
-                messages.extend(message_history)
+                messages.extend([
+                    m if isinstance(m, Message) else Message(**m) 
+                    for m in message_history
+                ])
 
             # Process prompt (handle structured input)
             final_prompt = prompt
@@ -664,6 +694,7 @@ class Agent(Generic[DepsT, OutputT]):
                 system_prompt=self._system_prompt,
                 abort_signal=abort_controller.signal,
                 run_id=run_id,
+                memory_manager=self._memory_manager,
                 deps=deps,
             )
 
@@ -771,7 +802,10 @@ class Agent(Generic[DepsT, OutputT]):
                 messages.append(Message(role="system", content=self._system_prompt))
 
             if message_history:
-                messages.extend(message_history)
+                messages.extend([
+                    m if isinstance(m, Message) else Message(**m) 
+                    for m in message_history
+                ])
 
             # Process prompt
             final_prompt = prompt
@@ -799,6 +833,7 @@ class Agent(Generic[DepsT, OutputT]):
                 system_prompt=self._system_prompt,
                 abort_signal=abort_controller.signal,
                 run_id=run_id,
+                memory_manager=self._memory_manager,
                 deps=deps,
             )
 

@@ -9,8 +9,8 @@ A lightweight, model-agnostic LLM provider abstraction with streaming and tool s
 
 ## Features
 
-- **Multi-Provider**: Unified interface for OpenAI, Anthropic, Google, Groq, Ollama
-- **Streaming**: Typed `StreamChunk` union (TextDelta, ToolUse, MessageEnd, Error)
+- **Multi-Provider**: Unified interface for OpenAI, Anthropic, Google, Groq, Ollama, and Antigravity
+- **Streaming**: Typed `StreamChunk` union (TextDelta, ToolUse, MessageEnd, Error, ProviderRequest)
 - **Tool System**: `@tool` decorator for easy function-to-tool conversion
 - **MCP Integration**: First-class Model Context Protocol support
 - **Type Safe**: Full type hints with `py.typed` marker
@@ -87,6 +87,7 @@ result = await agent.run("What's the weather in Paris?")
 | Google | `google:model` | `google:gemini-1.5-pro` |
 | Groq | `groq:model` | `groq:llama-3.1-70b` |
 | Ollama | `ollama:model` | `ollama:llama3.2` |
+| Antigravity | `antigravity:model` | `antigravity:gemini-2.0-flash` |
 
 ## API Reference
 
