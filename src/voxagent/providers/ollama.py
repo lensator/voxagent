@@ -306,7 +306,7 @@ class OllamaProvider(BaseProvider):
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if line:
-                        print(f"DEBUG: Ollama raw line: {line}")
+                        # print(f"DEBUG: Ollama raw line: {line}")
                         yield line
 
     async def stream(

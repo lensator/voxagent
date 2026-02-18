@@ -53,39 +53,51 @@ class TestStrategyContext:
     def test_create_context(self):
         """StrategyContext can be created with required fields."""
         mock_provider = MagicMock()
-        mock_signal = MagicMock()
+        mock_controller = MagicMock()
 
         ctx = StrategyContext(
+            prompt="Hello",
+            deps=None,
+            session_key="session-1",
+            message_history=[],
+            timeout_ms=None,
             provider=mock_provider,
             tools=[],
             system_prompt="You are helpful",
-            abort_signal=mock_signal,
+            abort_controller=mock_controller,
             run_id="test-run-id",
         )
 
+        assert ctx.prompt == "Hello"
+        assert ctx.session_key == "session-1"
         assert ctx.provider == mock_provider
         assert ctx.tools == []
         assert ctx.system_prompt == "You are helpful"
-        assert ctx.abort_signal == mock_signal
+        assert ctx.abort_controller == mock_controller
         assert ctx.run_id == "test-run-id"
         assert ctx.deps is None
 
     def test_context_with_deps(self):
         """StrategyContext accepts custom deps."""
         mock_provider = MagicMock()
-        mock_signal = MagicMock()
+        mock_controller = MagicMock()
         mock_deps = {"session": "abc123"}
 
         ctx = StrategyContext(
+            prompt="Hello",
+            deps=mock_deps,
+            session_key=None,
+            message_history=None,
+            timeout_ms=1000,
             provider=mock_provider,
             tools=[],
             system_prompt=None,
-            abort_signal=mock_signal,
+            abort_controller=mock_controller,
             run_id="test-run-id",
-            deps=mock_deps,
         )
 
         assert ctx.deps == mock_deps
+        assert ctx.timeout_ms == 1000
 
 
 class TestAgentStrategyABC:
@@ -100,10 +112,10 @@ class TestAgentStrategyABC:
         """Strategy name property returns class name by default."""
 
         class MyCustomStrategy(AgentStrategy):
-            async def execute(self, ctx, messages):
+            async def execute(self, ctx):
                 return StrategyResult(messages=[], assistant_texts=[])
 
-            async def execute_stream(self, ctx, messages):
+            async def execute_stream(self, ctx):
                 yield  # type: ignore
 
         strategy = MyCustomStrategy()
@@ -113,19 +125,10 @@ class TestAgentStrategyABC:
         """Custom strategies must implement execute method."""
 
         class IncompleteStrategy(AgentStrategy):
-            async def execute_stream(self, ctx, messages):
+            async def execute_stream(self, ctx):
                 yield  # type: ignore
 
         with pytest.raises(TypeError, match="abstract"):
             IncompleteStrategy()
 
-    def test_custom_strategy_must_implement_execute_stream(self):
-        """Custom strategies must implement execute_stream method."""
-
-        class IncompleteStrategy(AgentStrategy):
-            async def execute(self, ctx, messages):
-                return StrategyResult(messages=[], assistant_texts=[])
-
-        with pytest.raises(TypeError, match="abstract"):
-            IncompleteStrategy()
 

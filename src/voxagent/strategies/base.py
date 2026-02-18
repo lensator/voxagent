@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 if TYPE_CHECKING:
-    from voxagent.providers.base import AbortSignal, BaseProvider
+    from voxagent.agent.abort import AbortController
+    from voxagent.providers.base import BaseProvider
     from voxagent.streaming.events import StreamEventData
     from voxagent.tools.definition import ToolDefinition
     from voxagent.types.messages import Message, ToolCall, ToolResult
@@ -23,7 +24,15 @@ if TYPE_CHECKING:
 
 @dataclass
 class StrategyResult:
-    """Result from strategy execution."""
+    """Result from strategy execution.
+    
+    Attributes:
+        messages: All messages from the run (system, user, assistant, tool results).
+        assistant_texts: List of assistant response texts (one per LLM call).
+        tool_metas: Metadata for each tool execution.
+        metadata: Strategy-specific metadata (iterations, steps, etc.).
+        error: Domain-level error message if run failed logically.
+    """
 
     messages: list["Message"]
     assistant_texts: list[str]
@@ -34,26 +43,41 @@ class StrategyResult:
 
 @dataclass
 class StrategyContext:
-    """Context provided to strategies for LLM and tool access."""
+    """Context for strategy execution.
+    
+    Provides access to LLM, tools, and the canonical tool loop.
+    All helper methods handle abort signal internally.
+    """
 
-    # Core components
+    # Original request
+    prompt: str
+    deps: Any | None
+    session_key: str | None
+    message_history: list["Message"] | None
+    timeout_ms: int | None
+
+    # Agent internals
     provider: "BaseProvider"
     tools: list["ToolDefinition"]
     system_prompt: str | None
-    abort_signal: "AbortSignal"
+    abort_controller: "AbortController"
+    
+    # Run tracking
     run_id: str
 
     # Memory and Sync
     memory_manager: Any | None = None
 
-    # Dependencies for tool execution
-    deps: Any = None
-
     async def call_llm(
         self,
         messages: list["Message"],
+        tools: list["ToolDefinition"] | None = None,
     ) -> tuple[str, list["ToolCall"]]:
-        """Call the LLM and return (response_text, tool_calls)."""
+        """Make a single LLM call and return (text, tool_calls).
+        
+        Collects all streaming chunks internally and returns final result.
+        Does NOT emit events - use call_llm_stream() for event emission.
+        """
         from voxagent.providers.base import (
             ErrorChunk,
             MessageEndChunk,
@@ -65,11 +89,15 @@ class StrategyContext:
         tool_calls: list["ToolCall"] = []
 
         from voxagent.types.messages import Message as Msg
+        
+        # Use provided tools or default to context tools
+        effective_tools = tools if tools is not None else self.tools
+        
         async for chunk in self.provider.stream(
             messages=[m if isinstance(m, Msg) else Msg(**m) for m in messages],
             system=self.system_prompt,
-            tools=[t.to_openai_schema() for t in self.tools] if self.tools else None,
-            abort_signal=self.abort_signal,
+            tools=[t.to_openai_schema() for t in effective_tools] if effective_tools else None,
+            abort_signal=self.abort_controller.signal,
         ):
             if isinstance(chunk, TextDeltaChunk):
                 response_text += chunk.delta
@@ -86,14 +114,17 @@ class StrategyContext:
         self,
         tool_call: "ToolCall",
     ) -> "ToolResult":
-        """Execute a single tool call."""
+        """Execute a single tool call.
+        
+        Does NOT emit events - use execute_tool_stream() for event emission.
+        """
         from voxagent.tools.executor import execute_tool
 
         return await execute_tool(
             name=tool_call.name,
             params=tool_call.params,
             tools=self.tools,
-            abort_signal=self.abort_signal,
+            abort_signal=self.abort_controller.signal,
             tool_use_id=tool_call.id,
             deps=self.deps,
             run_id=self.run_id,
@@ -103,8 +134,15 @@ class StrategyContext:
         self,
         messages: list["Message"],
         max_iterations: int = 50,
-    ) -> StrategyResult:
-        """Run the canonical tool loop until no more tool calls."""
+    ) -> tuple[list["Message"], list[str], list["ToolMeta"]]:
+        """Run the canonical tool loop, returning (messages, texts, metas).
+        
+        This is THE canonical tool loop implementation. DefaultStrategy
+        delegates to this method. Other strategies may call this directly
+        for their inner loops.
+        
+        Does NOT emit events - use run_tool_loop_stream() for event emission.
+        """
         from voxagent.types.messages import Message as Msg
         from voxagent.types.run import ToolMeta
 
@@ -113,7 +151,7 @@ class StrategyContext:
         working_messages = list(messages)  # Copy to avoid mutation
 
         for _ in range(max_iterations):
-            if self.abort_signal.aborted:
+            if self.abort_controller.signal.aborted:
                 break
 
             response_text, tool_calls = await self.call_llm(working_messages)
@@ -157,17 +195,17 @@ class StrategyContext:
                     )
                 )
 
-        return StrategyResult(
-            messages=working_messages,
-            assistant_texts=assistant_texts,
-            tool_metas=tool_metas,
-        )
+        return working_messages, assistant_texts, tool_metas
 
     async def call_llm_stream(
         self,
         messages: list["Message"],
+        tools: list["ToolDefinition"] | None = None,
     ) -> AsyncIterator["StreamEventData"]:
-        """Stream LLM response, yielding events."""
+        """Stream LLM call, yielding events.
+        
+        Yields TextDeltaEvent and other events.
+        """
         from voxagent.providers.base import (
             ErrorChunk,
             MessageEndChunk,
@@ -181,11 +219,14 @@ class StrategyContext:
         )
 
         from voxagent.types.messages import Message as Msg
+        
+        effective_tools = tools if tools is not None else self.tools
+        
         async for chunk in self.provider.stream(
             messages=[m if isinstance(m, Msg) else Msg(**m) for m in messages],
             system=self.system_prompt,
-            tools=[t.to_openai_schema() for t in self.tools] if self.tools else None,
-            abort_signal=self.abort_signal,
+            tools=[t.to_openai_schema() for t in effective_tools] if effective_tools else None,
+            abort_signal=self.abort_controller.signal,
         ):
             if isinstance(chunk, TextDeltaChunk):
                 yield TextDeltaEvent(run_id=self.run_id, delta=chunk.delta)
@@ -202,7 +243,14 @@ class StrategyContext:
         messages: list["Message"],
         max_iterations: int = 50,
     ) -> AsyncIterator["StreamEventData"]:
-        """Run the tool loop, streaming all events."""
+        """Stream the canonical tool loop, yielding all events.
+        
+        Yields:
+            TextDeltaEvent (LLM streaming)
+            ToolStartEvent (before each tool)
+            ToolEndEvent (after each tool)
+            ProviderRequestEvent
+        """
         from voxagent.providers.base import (
             ErrorChunk,
             MessageEndChunk,
@@ -219,12 +267,12 @@ class StrategyContext:
             ToolStartEvent,
         )
         from voxagent.types.messages import Message as Msg
-        from voxagent.types.messages import ToolCall, ToolResult
+        from voxagent.types.messages import ToolCall
 
         working_messages = list(messages)
 
         for _ in range(max_iterations):
-            if self.abort_signal.aborted:
+            if self.abort_controller.signal.aborted:
                 break
 
             response_text = ""
@@ -237,7 +285,7 @@ class StrategyContext:
                 tools=[t.to_openai_schema() for t in self.tools]
                 if self.tools
                 else None,
-                abort_signal=self.abort_signal,
+                abort_signal=self.abort_controller.signal,
             ):
                 if isinstance(chunk, TextDeltaChunk):
                     response_text += chunk.delta
@@ -296,32 +344,52 @@ class StrategyContext:
 
 
 class AgentStrategy(ABC):
-    """Abstract base class for agent execution strategies."""
+    """Base class for agentic behavior patterns.
+    
+    A strategy encapsulates how an agent processes a prompt - whether that's
+    a simple tool loop, reflection cycles, planning phases, or other patterns.
+    
+    Implementers must:
+    - Implement execute() for non-streaming runs
+    - Optionally override execute_stream() for true streaming (default wraps execute())
+    - Handle abort signal at iteration boundaries
+    """
 
     @property
     def name(self) -> str:
-        """Return the strategy name (class name by default)."""
+        """Strategy name for logging/debugging."""
         return self.__class__.__name__
 
     @abstractmethod
     async def execute(
         self,
         ctx: StrategyContext,
-        messages: list["Message"],
     ) -> StrategyResult:
-        """Execute the strategy (non-streaming)."""
+        """Execute the strategy behavior pattern.
+        
+        Must check context.abort_controller.signal.aborted at iteration boundaries.
+        Must set StrategyResult.error for domain-level failures.
+        May raise exceptions for infrastructure failures.
+        """
         ...
 
-    @abstractmethod
     async def execute_stream(
         self,
         ctx: StrategyContext,
-        messages: list["Message"],
     ) -> AsyncIterator["StreamEventData"]:
-        """Execute the strategy with streaming."""
-        ...
-        # This yield is needed to make this an async generator
-        yield  # type: ignore[misc]
+        """Execute the strategy with streaming events.
+        
+        Default implementation calls execute() and yields synthetic events.
+        Override for true streaming support.
+        """
+        from voxagent.streaming.events import TextDeltaEvent
+        
+        # Default: run non-streaming and yield final events
+        result = await self.execute(ctx)
+        
+        # Yield synthetic text events from collected texts
+        for text in result.assistant_texts:
+            yield TextDeltaEvent(run_id=ctx.run_id, delta=text)
 
 
 __all__ = [

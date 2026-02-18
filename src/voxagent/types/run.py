@@ -155,6 +155,7 @@ class RunResult(BaseModel):
         aborted: Whether the run was aborted.
         timed_out: Whether the run timed out.
         error: Error message if the run failed.
+        strategy_metadata: Strategy-specific metadata (iterations, steps, etc.).
     """
 
     messages: list[Message]
@@ -163,6 +164,7 @@ class RunResult(BaseModel):
     aborted: bool = False
     timed_out: bool = False
     error: str | None = None
+    strategy_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 __all__ = [

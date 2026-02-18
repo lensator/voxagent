@@ -82,6 +82,8 @@ class LanceDBMemoryManager:
 
     async def add_fact(self, content: str, source: str, metadata: Optional[dict] = None):
         """Add a fact to the memory index."""
+        if not HAS_LANCEDB:
+            return
         self._ensure_connected()
         table_name = "facts"
         
@@ -102,6 +104,8 @@ class LanceDBMemoryManager:
 
     async def search_facts(self, query: str, limit: int = 5) -> list[dict]:
         """Search for relevant facts using vector similarity."""
+        if not HAS_LANCEDB:
+            return []
         self._ensure_connected()
         table_name = "facts"
         

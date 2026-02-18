@@ -678,8 +678,8 @@ class Agent(Generic[DepsT, OutputT]):
                 else:
                     final_prompt = str(prompt)
 
-            # Add user prompt
-            messages.append(Message(role="user", content=final_prompt))
+            # Add user prompt (don't add to messages yet, strategy will do it)
+            # messages.append(Message(role="user", content=final_prompt))
 
             # Get provider
             provider = self._get_provider()
@@ -689,17 +689,21 @@ class Agent(Generic[DepsT, OutputT]):
 
             # Create strategy context
             strategy_ctx = StrategyContext(
+                prompt=final_prompt,
+                deps=deps,
+                session_key=session_key,
+                message_history=messages,
+                timeout_ms=timeout_ms,
                 provider=provider,
                 tools=all_tools,
                 system_prompt=self._system_prompt,
-                abort_signal=abort_controller.signal,
+                abort_controller=abort_controller,
                 run_id=run_id,
                 memory_manager=self._memory_manager,
-                deps=deps,
             )
 
             # Execute strategy
-            strategy_result = await active_strategy.execute(strategy_ctx, messages)
+            strategy_result = await active_strategy.execute(strategy_ctx)
 
             # Check timeout
             if timeout_handler and timeout_handler.expired:
@@ -717,6 +721,7 @@ class Agent(Generic[DepsT, OutputT]):
                 aborted=abort_controller.signal.aborted and not timed_out,
                 timed_out=timed_out,
                 error=strategy_result.error,
+                strategy_metadata=strategy_result.metadata,
             )
 
         except Exception as e:
@@ -818,7 +823,8 @@ class Agent(Generic[DepsT, OutputT]):
                 else:
                     final_prompt = str(prompt)
 
-            messages.append(Message(role="user", content=final_prompt))
+            # Add user prompt (don't add to messages yet, strategy will do it)
+            # messages.append(Message(role="user", content=final_prompt))
 
             # Get provider
             provider = self._get_provider()
@@ -828,17 +834,21 @@ class Agent(Generic[DepsT, OutputT]):
 
             # Create strategy context
             strategy_ctx = StrategyContext(
+                prompt=final_prompt,
+                deps=deps,
+                session_key=session_key,
+                message_history=messages,
+                timeout_ms=timeout_ms,
                 provider=provider,
                 tools=all_tools,
                 system_prompt=self._system_prompt,
-                abort_signal=abort_controller.signal,
+                abort_controller=abort_controller,
                 run_id=run_id,
                 memory_manager=self._memory_manager,
-                deps=deps,
             )
 
             # Execute strategy with streaming
-            async for event in active_strategy.execute_stream(strategy_ctx, messages):
+            async for event in active_strategy.execute_stream(strategy_ctx):
                 yield event
 
             # Check timeout

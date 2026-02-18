@@ -41,24 +41,25 @@ class TestDefaultStrategyExecute:
         strategy = DefaultStrategy(max_iterations=25)
 
         # Mock context with run_tool_loop
-        mock_result = StrategyResult(
-            messages=[Message(role="assistant", content="Hello")],
-            assistant_texts=["Hello"],
-            metadata={},
-        )
+        mock_messages = [Message(role="assistant", content="Hello")]
+        mock_texts = ["Hello"]
+        mock_metas = []
 
         mock_ctx = MagicMock(spec=StrategyContext)
-        mock_ctx.run_tool_loop = AsyncMock(return_value=mock_result)
+        mock_ctx.prompt = "Hi"
+        mock_ctx.message_history = []
+        mock_ctx.run_tool_loop = AsyncMock(return_value=(mock_messages, mock_texts, mock_metas))
 
-        messages = [Message(role="user", content="Hi")]
-
-        result = await strategy.execute(mock_ctx, messages)
+        result = await strategy.execute(mock_ctx)
 
         # Verify delegation
-        mock_ctx.run_tool_loop.assert_called_once_with(
-            messages=messages,
-            max_iterations=25,
-        )
+        # Note: DefaultStrategy._build_initial_messages creates the messages list
+        # which includes the user prompt.
+        mock_ctx.run_tool_loop.assert_called_once()
+        args, kwargs = mock_ctx.run_tool_loop.call_args
+        assert kwargs["max_iterations"] == 25
+        assert len(kwargs["messages"]) == 1
+        assert kwargs["messages"][0].content == "Hi"
 
         # Verify result has strategy metadata
         assert result.metadata["strategy_name"] == "DefaultStrategy"
@@ -69,26 +70,19 @@ class TestDefaultStrategyExecute:
         """execute() preserves all result data from context."""
         strategy = DefaultStrategy()
 
-        messages = [Message(role="user", content="Test")]
-        tool_metas = []
-
-        mock_result = StrategyResult(
-            messages=messages,
-            assistant_texts=["Response 1", "Response 2"],
-            tool_metas=tool_metas,
-            metadata={"existing": "data"},
-            error=None,
-        )
+        mock_messages = [Message(role="user", content="Test"), Message(role="assistant", content="Response")]
+        mock_texts = ["Response"]
+        mock_metas = []
 
         mock_ctx = MagicMock(spec=StrategyContext)
-        mock_ctx.run_tool_loop = AsyncMock(return_value=mock_result)
+        mock_ctx.prompt = "Test"
+        mock_ctx.message_history = []
+        mock_ctx.run_tool_loop = AsyncMock(return_value=(mock_messages, mock_texts, mock_metas))
 
-        result = await strategy.execute(mock_ctx, messages)
+        result = await strategy.execute(mock_ctx)
 
-        assert result.assistant_texts == ["Response 1", "Response 2"]
+        assert result.assistant_texts == ["Response"]
         assert result.error is None
-        # Strategy adds to existing metadata
-        assert result.metadata["existing"] == "data"
         assert result.metadata["strategy_name"] == "DefaultStrategy"
 
 
@@ -106,12 +100,12 @@ class TestDefaultStrategyExecuteStream:
             yield TextDeltaEvent(run_id="test", delta=" World")
 
         mock_ctx = MagicMock(spec=StrategyContext)
+        mock_ctx.prompt = "Hi"
+        mock_ctx.message_history = []
         mock_ctx.run_tool_loop_stream = mock_stream
 
-        messages = [Message(role="user", content="Hi")]
-
         events = []
-        async for event in strategy.execute_stream(mock_ctx, messages):
+        async for event in strategy.execute_stream(mock_ctx):
             events.append(event)
 
         assert len(events) == 2
@@ -133,12 +127,12 @@ class TestDefaultStrategyExecuteStream:
             yield TextDeltaEvent(run_id="test", delta="Done!")
 
         mock_ctx = MagicMock(spec=StrategyContext)
+        mock_ctx.prompt = "Do something"
+        mock_ctx.message_history = []
         mock_ctx.run_tool_loop_stream = mock_stream
 
-        messages = [Message(role="user", content="Do something")]
-
         events = []
-        async for event in strategy.execute_stream(mock_ctx, messages):
+        async for event in strategy.execute_stream(mock_ctx):
             events.append(event)
 
         assert len(events) == 4
@@ -146,4 +140,5 @@ class TestDefaultStrategyExecuteStream:
         assert isinstance(events[1], ToolStartEvent)
         assert isinstance(events[2], ToolEndEvent)
         assert isinstance(events[3], TextDeltaEvent)
+
 

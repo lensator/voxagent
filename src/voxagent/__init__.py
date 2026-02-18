@@ -107,7 +107,16 @@ def __getattr__(name: str) -> object:
         return getattr(providers, name)
 
     # Strategies
-    if name in ("AgentStrategy", "StrategyContext", "StrategyResult", "DefaultStrategy"):
+    if name in (
+        "AgentStrategy",
+        "StrategyContext",
+        "StrategyResult",
+        "DefaultStrategy",
+        "ReflectionStrategy",
+        "PlanAndExecuteStrategy",
+        "ReActStrategy",
+        "RetryStrategy",
+    ):
         from . import strategies
 
         return getattr(strategies, name)
@@ -150,5 +159,10 @@ __all__ = [
     "StrategyContext",
     "StrategyResult",
     "DefaultStrategy",
+    "ReflectionStrategy",
+    "PlanAndExecuteStrategy",
+    "ReActStrategy",
+    "RetryStrategy",
 ]
+
 
