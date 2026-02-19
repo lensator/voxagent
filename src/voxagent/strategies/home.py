@@ -1,13 +1,15 @@
 """Home Orchestrator Strategy for Samaritan.
 
-Strictly follows the Dual-Stage Workflow:
-1. Intent Module (Fast Model): Check if it is a device control command.
-2. Tool Execution: If it is a device command, execute it using the fast model.
-3. Strategy Selection: If not a device command, or after execution, choose a strategy (e.g. Synthesis) to handle the response.
+Single-stage workflow using fast model only:
+1. Fast Model detects device intent and executes commands
+2. Returns simple confirmation or NOT_A_DEVICE_COMMAND for non-device queries
 """
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any, AsyncIterator, List
+
+import httpx
 
 from voxagent.strategies.base import AgentStrategy, StrategyContext, StrategyResult
 from voxagent.types.messages import Message as Msg
@@ -25,28 +27,59 @@ logger = logging.getLogger(__name__)
 class HomeOrchestratorStrategy(AgentStrategy):
     """Orchestrates Samaritan behavior using a dual-stage intent/synthesis approach."""
 
-    def __init__(self, fast_model: str = "ollama:qwen2.5-coder:3b", max_iterations: int = 5, debug: bool = False):
+    def __init__(
+        self,
+        fast_model: str = "ollama:qwen2.5-coder:3b",
+        max_iterations: int = 5,
+        excluded_devices: list[str] | None = None,
+        debug: bool = False
+    ):
         super().__init__()
         self._fast_model = fast_model
         self._max_iterations = max_iterations
+        self._excluded_devices = set(excluded_devices or [])
         self._debug = debug
 
     async def _get_device_list(self, ctx: StrategyContext) -> str:
-        """Fetch list of devices from LanceDB memory with fallback."""
-        devices = []
-        if ctx.memory_manager:
-            try:
-                facts = await ctx.memory_manager.search_facts("HARDWARE_INFO", limit=50)
-                for f in facts:
-                    devices.append(f.get("content", ""))
-            except Exception as e:
-                logger.error(f"Error fetching device list: {e}")
-        
-        if not devices:
-            # Fallback for testing environments without working LanceDB
-            return "HARDWARE_INFO: Name: Kitchen Light. ID: light.kitchen. Status: ON. Type: Light."
-            
-        return "\n".join(devices)
+        """Fetch list of devices from Home Assistant API directly."""
+        url = os.environ.get("HASS_URL", "http://localhost:8123").rstrip("/")
+        token = os.environ.get("HASS_TOKEN")
+
+        if not token:
+            logger.warning("HASS_TOKEN not set, cannot fetch devices")
+            return "No devices available (HASS_TOKEN not set)"
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{url}/api/states",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    timeout=10.0
+                )
+                if response.status_code != 200:
+                    logger.error(f"HASS API error: {response.status_code}")
+                    return "No devices available (API error)"
+
+                entities = response.json()
+                # Filter to only controllable devices, excluding configured ones
+                valid_domains = ["light", "switch"]
+                result = []
+                for e in entities:
+                    entity_id = e["entity_id"]
+                    # Skip excluded devices
+                    if entity_id in self._excluded_devices:
+                        continue
+                    domain = entity_id.split(".")[0]
+                    if domain in valid_domains:
+                        name = e.get("attributes", {}).get("friendly_name", entity_id)
+                        state = e["state"]
+                        device_type = "Light" if domain == "light" else "Switch"
+                        result.append(f"HARDWARE_INFO: Name: {name}. ID: {entity_id}. Status: {state.upper()}. Type: {device_type}.")
+
+                return "\n".join(result) if result else "No controllable devices found."
+        except Exception as e:
+            logger.error(f"Error fetching device list from HASS: {e}")
+            return f"No devices available (error: {e})"
 
     async def execute(self, ctx: StrategyContext) -> StrategyResult:
         """Synchronous execution (not optimized for this strategy)."""
@@ -78,19 +111,22 @@ class HomeOrchestratorStrategy(AgentStrategy):
             yield RunErrorEvent(run_id=ctx.run_id, error=f"Fast model provider {self._fast_model} not found.")
             return
 
-        # Prepare Intent Context
+        # Fast model: minimal technical prompt, no persona
         intent_system = (
-            "SYSTEM: You are the Samaritan Intent Module. "
-            "Your ONLY job is to determine if the user wants to control hardware (lights, lamps, etc) or check their status. "
-            "1. If it IS a hardware command: Choose the correct tool from the list below and use it immediately. "
-            "   Example: If user says 'turn off kitchen light' and you see 'ID: light.kitchen', call turn_off_light(entity_id='light.kitchen'). "
-            "   After the tool call, output ONLY 'DONE'. "
-            "2. If it IS NOT a hardware command: Output ONLY 'NOT_A_DEVICE_COMMAND'. "
-            "DO NOT talk to the user. DO NOT explain yourself.\n\n"
-            f"AVAILABLE DEVICES:\n{device_list}"
+            "Detect device intent. "
+            "If device command: call tool, output 'DONE'. "
+            "If not: output 'NOT_A_DEVICE_COMMAND'. "
+            "Use history to resolve 'it', 'that'.\n\n"
+            f"DEVICES:\n{device_list}"
         )
-        
-        intent_messages = [Msg(role="user", content=user_prompt)]
+
+        # Include ONLY user/assistant messages from history (no system prompts)
+        intent_messages = []
+        if ctx.message_history:
+            for msg in ctx.message_history:
+                if msg.role in ("user", "assistant"):
+                    intent_messages.append(msg)
+        intent_messages.append(Msg(role="user", content=user_prompt))
         
         if self._debug:
             print("\n" + "="*20 + " DEBUG: INTENT STAGE (FAST MODEL) " + "="*20)
@@ -117,17 +153,28 @@ class HomeOrchestratorStrategy(AgentStrategy):
         is_device_command = False
         tool_results = []
         intent_output = ""
+        seen_tool_calls = set()  # Track unique tool calls to detect duplicates
 
         # Run Tool Loop with Fast Model (SILENT to user)
         async for event in local_ctx.run_tool_loop_stream(intent_messages, max_iterations=self._max_iterations):
             if isinstance(event, TextDeltaEvent):
                 intent_output += event.delta
                 # NEVER yield text from the intent module to the user
-            elif isinstance(event, (ToolStartEvent, ToolEndEvent, ToolOutputEvent)):
+            elif isinstance(event, ToolStartEvent):
+                # Create a signature for this tool call to detect duplicates
+                tc = event.tool_call
+                call_signature = f"{tc.name}:{tc.params}"
+                if call_signature in seen_tool_calls:
+                    # Duplicate tool call detected - model is looping, stop here
+                    logger.debug(f"Duplicate tool call detected: {call_signature}, breaking loop")
+                    break
+                seen_tool_calls.add(call_signature)
+                is_device_command = True
+                yield event
+            elif isinstance(event, (ToolEndEvent, ToolOutputEvent)):
                 is_device_command = True
                 if isinstance(event, ToolOutputEvent):
                     tool_results.append(event.delta)
-                # We yield tool events so the UI shows progress (e.g. "Calling get_light_status")
                 yield event
             elif isinstance(event, RunErrorEvent):
                 # If the fast model fails, we might still want the power model to try
@@ -140,19 +187,19 @@ class HomeOrchestratorStrategy(AgentStrategy):
         # Check if the fast model reported not being a device command
         is_not_device = "NOT_A_DEVICE_COMMAND" in intent_output or not is_device_command
         
+        # Use system_prompt from config files (personas, rules loaded by client)
+        base_system = ctx.system_prompt or ""
+
         if is_not_device:
-            # Handle as a general query or complex mission
-            synthesis_system = (
-                f"You are Samaritan. Follow the Core Protocol.\n"
-                f"INTERNAL_SYSTEM_STATE: {device_list}\n"
-                f"If the user asked for something related to the home, use the state to answer."
-            )
+            # General query - use full system prompt from config
+            synthesis_system = base_system
         else:
-            # Refine the execution result into a human answer
+            # Device command executed - append result context
             synthesis_system = (
-                f"You are Samaritan. You just executed a device command.\n"
-                f"TOOL_RESULTS: {tool_results}\n"
-                f"Confirm the action to the user concisely in their language."
+                f"{base_system}\n\n"
+                f"[DEVICE_ACTION_RESULT]\n"
+                f"Results: {tool_results}\n"
+                f"Confirm concisely to the user."
             )
 
         if self._debug:
@@ -168,23 +215,28 @@ class HomeOrchestratorStrategy(AgentStrategy):
             print("="*60 + "\n")
 
         from voxagent.providers.base import TextDeltaChunk, ToolUseChunk, ErrorChunk, MessageEndChunk
-        
+
         # Build final messages manually
         final_messages = []
         if ctx.message_history:
             final_messages.extend(ctx.message_history)
         final_messages.append(Msg(role="user", content=ctx.prompt))
 
+        # Track assistant response for session persistence
+        assistant_response = ""
+
         # Final synthesis with Power Model
+        # Note: tools=None because fast model already executed device commands
         async for chunk in ctx.provider.stream(
-            messages=final_messages, 
-            system=synthesis_system, 
-            tools=[t.to_openai_schema() for t in ctx.tools] if ctx.tools else None,
+            messages=final_messages,
+            system=synthesis_system,
+            tools=None,
             abort_signal=ctx.abort_controller.signal
         ):
             if self._debug:
                 print(f"CHUNK: {type(chunk).__name__}")
             if isinstance(chunk, TextDeltaChunk):
+                assistant_response += chunk.delta
                 yield TextDeltaEvent(run_id=ctx.run_id, delta=chunk.delta)
             elif isinstance(chunk, ToolUseChunk):
                 yield ToolStartEvent(run_id=ctx.run_id, tool_call=chunk.tool_call)
@@ -192,5 +244,10 @@ class HomeOrchestratorStrategy(AgentStrategy):
                 yield RunErrorEvent(run_id=ctx.run_id, error=chunk.error)
             elif isinstance(chunk, MessageEndChunk):
                 break
+
+        # Save session with the new messages (uses shared session storage from base class)
+        if ctx.session_key and assistant_response:
+            final_messages.append(Msg(role="assistant", content=assistant_response))
+            await self.save_to_session(ctx.session_key, final_messages)
 
 __all__ = ["HomeOrchestratorStrategy"]

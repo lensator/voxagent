@@ -68,6 +68,9 @@ class StrategyContext:
     # Memory and Sync
     memory_manager: Any | None = None
 
+    # Session storage for persistence
+    session_storage: Any | None = None
+
     async def call_llm(
         self,
         messages: list["Message"],
@@ -345,20 +348,79 @@ class StrategyContext:
 
 class AgentStrategy(ABC):
     """Base class for agentic behavior patterns.
-    
+
     A strategy encapsulates how an agent processes a prompt - whether that's
     a simple tool loop, reflection cycles, planning phases, or other patterns.
-    
+
     Implementers must:
     - Implement execute() for non-streaming runs
     - Optionally override execute_stream() for true streaming (default wraps execute())
     - Handle abort signal at iteration boundaries
     """
 
+    # Shared session storage for all strategies
+    _shared_session_storage: Any = None
+    _session_dir: str | None = None
+
+    @classmethod
+    def init_session_storage(cls, session_dir: str = "~/.samaritan/sessions") -> None:
+        """Initialize shared session storage for all strategies.
+
+        Args:
+            session_dir: Directory to store sessions. Defaults to ~/.samaritan/sessions
+        """
+        from pathlib import Path
+        from voxagent.session.storage import FileSessionStorage
+
+        cls._session_dir = session_dir
+        path = Path(session_dir).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        cls._shared_session_storage = FileSessionStorage(path)
+
+    @classmethod
+    def get_session_storage(cls) -> Any:
+        """Get the shared session storage, initializing if needed."""
+        if cls._shared_session_storage is None:
+            cls.init_session_storage()
+        return cls._shared_session_storage
+
     @property
     def name(self) -> str:
         """Strategy name for logging/debugging."""
         return self.__class__.__name__
+
+    async def save_to_session(
+        self,
+        session_key: str,
+        messages: list["Message"],
+    ) -> None:
+        """Save messages to session with strategy metadata.
+
+        Args:
+            session_key: The session identifier.
+            messages: Messages to save.
+        """
+        from datetime import datetime, timezone
+        from voxagent.session.model import Session
+
+        storage = self.get_session_storage()
+        if not storage:
+            return
+
+        session = await storage.load(session_key)
+        if not session:
+            session = Session.create(key=session_key)
+
+        # Add strategy metadata to messages
+        for msg in messages:
+            if not hasattr(msg, 'metadata') or msg.metadata is None:
+                msg.metadata = {}
+            if 'strategy' not in msg.metadata:
+                msg.metadata['strategy'] = self.name
+                msg.metadata['timestamp'] = datetime.now(timezone.utc).isoformat()
+
+        session.messages = messages
+        await storage.save(session)
 
     @abstractmethod
     async def execute(

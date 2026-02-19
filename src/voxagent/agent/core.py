@@ -6,7 +6,9 @@ import inspect
 import re
 import time
 import uuid
+import warnings
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
 from voxagent.agent.abort import AbortController, TimeoutHandler
@@ -39,7 +41,7 @@ from voxagent.strategies.base import AgentStrategy, StrategyContext, StrategyRes
 from voxagent.strategies.default import DefaultStrategy
 
 if TYPE_CHECKING:
-    pass
+    from voxagent.config import SamaritanConfig
 
 DepsT = TypeVar("DepsT")
 OutputT = TypeVar("OutputT")
@@ -58,12 +60,13 @@ class Agent(Generic[DepsT, OutputT]):
 
     def __init__(
         self,
-        model: str,  # "provider:model" format
+        model: str | None = None,  # Optional - can come from config
         *,
+        config_path: str | Path | None = None,  # None = use default ~/.samaritan/config.json
         name: str | None = None,
         deps_type: type[DepsT] | None = None,
         output_type: type[OutputT] | None = None,
-        system_prompt: str | None = None,
+        system_prompt: str | None = None,  # Optional - can be built from config
         tools: list[ToolDefinition] | None = None,
         toolsets: list[Any] | None = None,
         sub_agents: list["Agent[Any, Any]"] | None = None,
@@ -71,8 +74,8 @@ class Agent(Generic[DepsT, OutputT]):
         retries: int = 1,
         result_retries: int = 1,
         # Strategy
-        strategy: AgentStrategy | None = None,
-        config_dir: str | None = None,
+        strategy: AgentStrategy | None = None,  # Optional - can come from config
+        config_dir: str | Path | None = None,  # DEPRECATED - for backward compat
         session_storage: Any | None = None,
         # Security features
         secret_patterns: list[str] | None = None,
@@ -80,33 +83,143 @@ class Agent(Generic[DepsT, OutputT]):
     ) -> None:
         """Initialize the Agent.
 
-        Args:
-            model: Model string in "provider:model" format (e.g., "openai:gpt-4")
-            name: Optional name for this agent (used when registered as sub-agent)
-            deps_type: Optional type for dependencies
-            output_type: Optional type for structured output
-            system_prompt: Optional system prompt for the agent
-            tools: Optional list of ToolDefinitions to register
-            toolsets: Optional list of toolsets (MCP servers, etc.)
-            sub_agents: Optional list of child Agents to register as tools
-            max_sub_agent_depth: Maximum nesting depth for sub-agent calls (default: 5)
-            retries: Number of retries for failed operations (default: 1)
-            result_retries: Number of retries for result validation (default: 1)
-            strategy: Optional execution strategy. Defaults to DefaultStrategy.
-            config_dir: Optional directory for persistent configuration (memory, rules, agents).
-            session_storage: Optional session storage for persistence and hybrid memory.
-            secret_patterns: Regex patterns to detect and mask secrets
-            secrets_to_redact: Dictionary of named secrets to redact
-        """
-        # Parse and validate model string
-        self._model_config = self._parse_model_string(model)
-        self._model_string = model
+        The Agent can be initialized in two ways:
 
-        # Store configuration
+        1. **Explicit configuration** (traditional):
+           ```python
+           agent = Agent(model="openai:gpt-4", system_prompt="You are helpful")
+           ```
+
+        2. **Config-based** (self-configuring):
+           ```python
+           agent = Agent()  # Uses ~/.samaritan/config.json
+           agent = Agent(config_path="~/custom/config.json")
+           ```
+
+        When using config-based initialization:
+        - Model is loaded from config.model
+        - System prompt is built from rules/ and personas/ directories
+        - Strategy is instantiated from config.strategy
+
+        Explicit parameters always override config values.
+
+        Args:
+            model: Model string in "provider:model" format (e.g., "openai:gpt-4").
+                   Optional if config file provides the model.
+            config_path: Path to config JSON file. If None, uses default
+                         ~/.samaritan/config.json. Set to False to disable config loading.
+            name: Optional name for this agent (used when registered as sub-agent).
+            deps_type: Optional type for dependencies.
+            output_type: Optional type for structured output.
+            system_prompt: Optional system prompt. If None and config exists,
+                           built from rules/ and personas/ directories.
+            tools: Optional list of ToolDefinitions to register.
+            toolsets: Optional list of toolsets (MCP servers, etc.).
+            sub_agents: Optional list of child Agents to register as tools.
+            max_sub_agent_depth: Maximum nesting depth for sub-agent calls (default: 5).
+            retries: Number of retries for failed operations (default: 1).
+            result_retries: Number of retries for result validation (default: 1).
+            strategy: Optional execution strategy. If None and config exists,
+                      instantiated from config.strategy. Defaults to DefaultStrategy.
+            config_dir: DEPRECATED. Use config_path instead.
+            session_storage: Optional session storage for persistence.
+            secret_patterns: Regex patterns to detect and mask secrets.
+            secrets_to_redact: Dictionary of named secrets to redact.
+
+        Raises:
+            ValueError: If model is not provided directly or via config file.
+        """
+        # Handle deprecated config_dir parameter
+        if config_dir is not None:
+            warnings.warn(
+                "config_dir parameter is deprecated. Use config_path instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        # -------------------------------------------------------------------------
+        # 1. Load config if not explicitly disabled
+        # -------------------------------------------------------------------------
+        config: SamaritanConfig | None = None
+        config_dir_path: Path | None = None
+
+        if config_path is not False:
+            from voxagent.config import load_config, get_default_config_path
+
+            # Determine actual config path
+            if config_path is not None:
+                actual_config_path = Path(config_path).expanduser()
+            else:
+                actual_config_path = get_default_config_path()
+
+            if actual_config_path.exists():
+                try:
+                    config = load_config(actual_config_path)
+                    config_dir_path = actual_config_path.parent
+                except Exception as e:
+                    warnings.warn(f"Failed to load config from {actual_config_path}: {e}")
+
+        # -------------------------------------------------------------------------
+        # 2. Resolve model (explicit param wins over config)
+        # -------------------------------------------------------------------------
+        final_model: str | None = model
+        if final_model is None and config:
+            final_model = config.model
+        if final_model is None:
+            raise ValueError(
+                "model must be provided either directly or via config file. "
+                "Ensure ~/.samaritan/config.json exists with a 'model' field, "
+                "or pass model='provider:model' explicitly."
+            )
+
+        # Parse and validate model string
+        self._model_config = self._parse_model_string(final_model)
+        self._model_string = final_model
+
+        # -------------------------------------------------------------------------
+        # 3. Build system_prompt if not provided
+        # -------------------------------------------------------------------------
+        final_system_prompt: str | None = system_prompt
+        if final_system_prompt is None and config and config_dir_path:
+            from voxagent.config import load_system_prompt
+            try:
+                final_system_prompt = load_system_prompt(config, config_dir_path)
+            except Exception as e:
+                warnings.warn(f"Failed to load system prompt from config: {e}")
+
+        # -------------------------------------------------------------------------
+        # 4. Instantiate strategy if not provided
+        # -------------------------------------------------------------------------
+        final_strategy: AgentStrategy | None = strategy
+        if final_strategy is None and config:
+            from voxagent.strategies import get_strategy_class
+            strategy_class = get_strategy_class(config.strategy)
+            if strategy_class:
+                # Build kwargs from config
+                strategy_kwargs: dict[str, Any] = {}
+                if config.fast_model:
+                    strategy_kwargs["fast_model"] = config.fast_model
+                if config.excluded_devices:
+                    strategy_kwargs["excluded_devices"] = config.excluded_devices
+                if config.debug:
+                    strategy_kwargs["debug"] = config.debug
+                try:
+                    final_strategy = strategy_class(**strategy_kwargs)
+                except TypeError:
+                    # Strategy doesn't accept these kwargs, instantiate without them
+                    final_strategy = strategy_class()
+
+        # Fall back to DefaultStrategy if still None
+        if final_strategy is None:
+            final_strategy = DefaultStrategy()
+
+        # -------------------------------------------------------------------------
+        # 5. Store configuration
+        # -------------------------------------------------------------------------
         self._name = name
         self._deps_type = deps_type
         self._output_type = output_type
-        self._system_prompt = system_prompt
+        self._system_prompt = final_system_prompt
         self._retries = retries
         self._result_retries = result_retries
         self._max_sub_agent_depth = max_sub_agent_depth
@@ -115,32 +228,35 @@ class Agent(Generic[DepsT, OutputT]):
         self._secret_patterns = secret_patterns
         self._secrets_to_redact = secrets_to_redact
 
-        # Strategy (default to DefaultStrategy for backwards compatibility)
-        self._strategy = strategy or DefaultStrategy()
+        # Strategy
+        self._strategy = final_strategy
+
+        # Store loaded config for reference
+        self._loaded_config = config
 
         # Config directory and internal services
-        self._config_dir = config_dir
+        # Use config_dir_path from loaded config, or legacy config_dir param
+        self._config_dir = str(config_dir_path) if config_dir_path else config_dir
         self._session_storage = session_storage
         self._memory_manager: Any | None = None
         self._sync_manager: Any | None = None
 
         if self._config_dir:
-            from pathlib import Path
             from voxagent.session.storage import FileSessionStorage
-            from voxagent.memory.lancedb import LanceDBMemoryManager
-            from voxagent.memory.sync import HomeSyncManager
 
-            config_path = Path(self._config_dir)
-            
-            # 1. Initialize Storage
+            cfg_path = Path(self._config_dir)
+
+            # 1. Initialize Session Storage (always works)
             if not self._session_storage:
-                self._session_storage = FileSessionStorage(config_path / "sessions")
-            
-            # 2. Initialize Memory
-            self._memory_manager = LanceDBMemoryManager(uri=str(config_path / "memory" / "lancedb"))
-            
-            # 3. Initialize Sync Manager (Lazy start)
-            self._sync_manager = HomeSyncManager(self, self._memory_manager)
+                self._session_storage = FileSessionStorage(cfg_path / "sessions")
+
+            # 2. Initialize Memory (LanceDB) - may fail on older CPUs without AVX2
+            # Skip LanceDB initialization entirely - it causes SIGILL on older CPUs
+            # even during import due to AVX2 requirements
+            import logging
+            logging.getLogger(__name__).info(
+                "LanceDB memory disabled (requires AVX2 instruction set)"
+            )
 
         # Tool registry
         self._tool_registry = ToolRegistry()
@@ -797,18 +913,26 @@ class Agent(Generic[DepsT, OutputT]):
             # Build messages list
             messages: list[Message] = []
 
-            # Prepend session summary if available
-            if session_key and self._session_storage:
-                session = await self._session_storage.load(session_key)
-                if session and session.summary:
-                    messages.append(Message(role="system", content=f"CONTEXT SUMMARY: {session.summary}"))
+            # Load session history if available (using shared strategy storage)
+            if session_key:
+                from voxagent.strategies.base import AgentStrategy
+                storage = AgentStrategy.get_session_storage()
+                if storage:
+                    session = await storage.load(session_key)
+                    if session:
+                        # Add summary if available
+                        if session.summary:
+                            messages.append(Message(role="system", content=f"CONTEXT SUMMARY: {session.summary}"))
+                        # Add previous messages from session
+                        if session.messages:
+                            messages.extend(session.messages)
 
             if self._system_prompt:
                 messages.append(Message(role="system", content=self._system_prompt))
 
             if message_history:
                 messages.extend([
-                    m if isinstance(m, Message) else Message(**m) 
+                    m if isinstance(m, Message) else Message(**m)
                     for m in message_history
                 ])
 
@@ -845,9 +969,11 @@ class Agent(Generic[DepsT, OutputT]):
                 abort_controller=abort_controller,
                 run_id=run_id,
                 memory_manager=self._memory_manager,
+                session_storage=self._session_storage,
             )
 
             # Execute strategy with streaming
+            # Note: Session persistence is handled by the strategy via save_to_session()
             async for event in active_strategy.execute_stream(strategy_ctx):
                 yield event
 

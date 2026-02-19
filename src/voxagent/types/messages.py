@@ -114,11 +114,13 @@ class Message(BaseModel):
         role: The role of the message sender ("user", "assistant", or "system").
         content: The message content, either a string or a list of ContentBlocks.
         tool_calls: Optional list of tool calls (only for assistant messages).
+        metadata: Optional metadata (strategy name, timestamp, etc.).
     """
 
     role: Literal["user", "assistant", "system"]
     content: str | list[ContentBlock]
     tool_calls: list[ToolCall] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 __all__ = [
