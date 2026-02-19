@@ -40,6 +40,15 @@ class HomeOrchestratorStrategy(AgentStrategy):
         self._excluded_devices = set(excluded_devices or [])
         self._debug = debug
 
+    def get_required_tools(self) -> List[Any]:
+        """Return Home Assistant tools required by this strategy."""
+        from voxagent.tools.home_assistant import (
+            hass_list_entities,
+            hass_control_device,
+            hass_get_state,
+        )
+        return [hass_list_entities, hass_control_device, hass_get_state]
+
     async def _get_device_list(self, ctx: StrategyContext) -> str:
         """Fetch list of devices from Home Assistant API directly."""
         url = os.environ.get("HASS_URL", "http://localhost:8123").rstrip("/")

@@ -389,6 +389,17 @@ class AgentStrategy(ABC):
         """Strategy name for logging/debugging."""
         return self.__class__.__name__
 
+    def get_required_tools(self) -> list[Any]:
+        """Return tools required by this strategy.
+
+        Override in subclasses to auto-register strategy-specific tools.
+        The Agent will call this during initialization and register the returned tools.
+
+        Returns:
+            List of ToolDefinition objects required by this strategy.
+        """
+        return []
+
     async def save_to_session(
         self,
         session_key: str,

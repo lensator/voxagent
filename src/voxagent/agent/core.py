@@ -156,6 +156,15 @@ class Agent(Generic[DepsT, OutputT]):
                 try:
                     config = load_config(actual_config_path)
                     config_dir_path = actual_config_path.parent
+
+                    # Auto-load .env from config directory
+                    env_file = config_dir_path / ".env"
+                    if env_file.exists():
+                        try:
+                            from dotenv import load_dotenv
+                            load_dotenv(env_file)
+                        except ImportError:
+                            pass  # python-dotenv not installed
                 except Exception as e:
                     warnings.warn(f"Failed to load config from {actual_config_path}: {e}")
 
@@ -262,6 +271,12 @@ class Agent(Generic[DepsT, OutputT]):
         self._tool_registry = ToolRegistry()
         if tools:
             for t in tools:
+                self._tool_registry.register(t)
+
+        # Auto-register tools from strategy (if not already provided)
+        if final_strategy and not tools:
+            strategy_tools = final_strategy.get_required_tools()
+            for t in strategy_tools:
                 self._tool_registry.register(t)
 
         # Register sub-agents as tools
